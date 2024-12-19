@@ -1194,6 +1194,7 @@ static bool demux_lavf_read_packet(struct demuxer *demux,
             return false;
         MP_WARN(demux, "error reading packet: %s.\n", av_err2str(r));
         if (priv->retry_counter >= 10) {
+            // 连续错误
             MP_ERR(demux, "...treating it as fatal error.\n");
             return false;
         }

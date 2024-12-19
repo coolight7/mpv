@@ -5,7 +5,7 @@ project('mpv',
         meson_version: '>=1.3.0',
         default_options: [
             'backend_max_links=16',
-            'buildtype=debugoptimized',
+            'buildtype=debug',
             'b_lundef=false',
             'c_std=c11',
             'cpp_std=c++20',
@@ -268,10 +268,10 @@ sources = files(
 # compiler stuff
 cc = meson.get_compiler('c')
 # cpp = meson.get_compiler('cpp')
-flags_cxx = ['-std=c++17', '-Wall', '-Werror', '-lstdc++']
 
-flags = ['-D_FILE_OFFSET_BITS=64']
+flags = ['-D_FILE_OFFSET_BITS=64', '-g']
 flags_c = []
+flags_cxx = ['-std=c++20', '-Wall', '-Werror', '-lstdc++']
 link_flags = []
 
 test_flags = ['-Wdisabled-optimization',

@@ -32,7 +32,7 @@ extern "C" {
   TARGET
 
 #define utilxxPrint(str, ...) \
-    _utilxxPrint(str, _MacroArgSize_d(__VA_ARGS__), __VA_ARGS__);
+    _utilxxPrint(str, _MacroArgSize_d(__VA_ARGS__), ##__VA_ARGS__);
 
 #ifdef __cplusplus
 }

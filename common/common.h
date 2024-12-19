@@ -33,6 +33,7 @@
 
 #include "osdep/compiler.h"
 #include "mpv_talloc.h"
+#include "../utilxx/utilxx.h"
 
 // double should be able to represent this exactly
 #define MP_NOPTS_VALUE (-0x1p+63)
