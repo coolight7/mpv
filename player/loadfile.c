@@ -323,6 +323,7 @@ void update_demuxer_properties(struct MPContext *mpctx)
         tracks->events &= ~DEMUX_EVENT_STREAMS;
     }
     if (events & DEMUX_EVENT_METADATA) {
+        mp_tags_print(demuxer->metadata);
         struct mp_tags *info =
             mp_tags_filtered(mpctx, demuxer->metadata, mpctx->opts->display_tags);
         // prev is used to attempt to print changed tags only (to some degree)
