@@ -11,6 +11,7 @@ struct mp_tags {
     int num_keys;
 };
 
+void mp_tags_print(struct mp_tags *tags);
 void mp_tags_set_str(struct mp_tags *tags, const char *key, const char *value);
 void mp_tags_set_bstr(struct mp_tags *tags, bstr key, bstr value);
 void mp_tags_remove_str(struct mp_tags *tags, const char *key);

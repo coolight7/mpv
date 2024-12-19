@@ -1,5 +1,5 @@
 project('mpv',
-        'c',
+        'c', 'cpp',
         license: ['GPL2+', 'LGPL2.1+'],
         version: files('./MPV_VERSION'),
         meson_version: '>=1.3.0',
@@ -267,6 +267,8 @@ sources = files(
 
 # compiler stuff
 cc = meson.get_compiler('c')
+# cpp = meson.get_compiler('cpp')
+flags_cxx = ['-std=c++17', '-Wall', '-Werror', '-lstdc++']
 
 flags = ['-D_FILE_OFFSET_BITS=64']
 flags_c = []
@@ -403,8 +405,11 @@ endif
 
 add_project_arguments(flags, language: ['c', 'cpp', 'objc'])
 add_project_arguments(flags_c, language: ['c', 'objc'])
+add_project_arguments(flags_cxx, language: ['cpp'])
 add_project_link_arguments(link_flags, language: ['c', 'cpp', 'objc'])
 
+# utilxx
+subdir('utilxx')
 
 # osdep
 cocoa = dependency('appleframeworks', modules: ['Cocoa', 'IOKit', 'QuartzCore'],

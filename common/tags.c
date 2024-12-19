@@ -22,6 +22,13 @@
 #include "common.h"
 #include "tags.h"
 #include "misc/bstr.h"
+#include "../utilxx/utilxx.h"
+
+void mp_tags_print(struct mp_tags *tags) {
+    for (int n = 0; n < tags->num_keys; n++) {
+        utilxxPrint("tag: %s = %s\n", tags->keys[n], tags->values[n]);
+    }
+}
 
 void mp_tags_set_str(struct mp_tags *tags, const char *key, const char *value)
 {
