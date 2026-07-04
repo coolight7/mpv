@@ -16,6 +16,7 @@
  */
 
 #include "libmpv_common.h"
+#include <stdint.h>
 
 static void wait_for_playback(void) {
   bool finished = false;
@@ -33,7 +34,7 @@ static void test_audio_fft_get_property(void) {
   int fft_size = 256;
 
   // Load a lavfi sine wave as audio source
-  reload_file("/home/mpv/test.mp3");
+  reload_file("/home/mpv/sine.wav");
 
   bool got_fft_data = false;
   bool finished = false;
@@ -101,12 +102,12 @@ static void test_audio_fft_get_property(void) {
 }
 
 static void test_audio_fft_read_property(void) {
-  int fft_size = 128;
+  int64_t fft_size = 128;
 
   // Observe the property to trigger FFT computation
+  mpv_set_property(ctx, "audio-fft-size", MPV_FORMAT_INT64, &fft_size);
   mpv_observe_property(ctx, 0, "audio-fft", MPV_FORMAT_BYTE_ARRAY);
-
-  reload_file("/home/mpv/test.mp3");
+  reload_file("/home/mpv/sine.wav");
 
   // Wait for a few FFT frames to be generated
   bool finished = false;
@@ -148,7 +149,7 @@ static void test_audio_fft_read_property(void) {
 }
 
 static void test_audio_fft_no_observers(void) {
-  reload_file("/home/mpv/test.mp3");
+  reload_file("/home/mpv/sine.wav");
 
   // Wait for playback to finish without observing the property
   wait_for_playback();

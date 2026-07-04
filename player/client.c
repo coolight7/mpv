@@ -1674,9 +1674,13 @@ static void send_client_property_changes(struct mpv_handle *ctx) {
       mp_assert(prop->refcount > 0);
 
       bool val_valid = req.status >= 0;
-      changed = prop->value_valid != val_valid;
-      if (prop->value_valid && val_valid)
-        changed = !equal_mpv_value(&prop->value, &val, prop->format);
+      if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
+        changed = true;
+      } else {
+        changed = prop->value_valid != val_valid;
+        if (prop->value_valid && val_valid)
+          changed = !equal_mpv_value(&prop->value, &val, prop->format);
+      }
       if (prop->value_ts == 0)
         changed = true; // initial event
 
@@ -1767,8 +1771,13 @@ static bool gen_property_change_event(struct mpv_handle *ctx) {
       ctx->cur_property = prop;
       prop->refcount += 1;
 
-      if (prop->value_valid)
-        m_option_copy(prop->type, &prop->value_ret, &prop->value);
+      if (prop->value_valid) {
+        if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
+          memcpy(&prop->value_ret, &prop->value, sizeof(struct mpv_byte_array));
+        } else {
+          m_option_copy(prop->type, &prop->value_ret, &prop->value);
+        }
+      }
 
       ctx->cur_property_event = (struct mpv_event_property){
           .name = prop->name,
