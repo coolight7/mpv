@@ -7998,29 +7998,3 @@ void mp_option_run_callback(struct MPContext *mpctx,
 void mp_notify_property(struct MPContext *mpctx, const char *property) {
   mp_client_property_change(mpctx, property);
 }
-
-bool mp_property_has_observers(struct MPContext *mpctx, const char *name) {
-  struct mp_client_api *clients = mpctx->clients;
-  int id = mp_get_property_id(mpctx, name);
-  bool has_observers = false;
-
-  mp_mutex_lock(&clients->lock);
-
-  for (int n = 0; n < clients->num_clients; n++) {
-    struct mpv_handle *client = clients->clients[n];
-    mp_mutex_lock(&client->lock);
-    for (int i = 0; i < client->num_properties; i++) {
-      if (client->properties[i]->id == id &&
-          property_shared_prefix(name, client->properties[i]->name)) {
-        has_observers = true;
-        break;
-      }
-    }
-    mp_mutex_unlock(&client->lock);
-    if (has_observers)
-      break;
-  }
-
-  mp_mutex_unlock(&clients->lock);
-  return has_observers;
-}

@@ -93,7 +93,6 @@ void mp_option_run_callback(struct MPContext *mpctx,
 
 void mp_notify(struct MPContext *mpctx, int event, void *arg);
 void mp_notify_property(struct MPContext *mpctx, const char *property);
-bool mp_property_has_observers(struct MPContext *mpctx, const char *name);
 
 void handle_command_updates(struct MPContext *mpctx);
 

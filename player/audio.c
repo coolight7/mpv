@@ -37,6 +37,7 @@
 #include "filters/f_decoder_wrapper.h"
 #include "filters/filter_internal.h"
 
+#include "client.h"
 #include "command.h"
 #include "core.h"
 

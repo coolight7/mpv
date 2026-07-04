@@ -143,6 +143,10 @@ if get_option('libmpv')
                      include_directories: incdir, dependencies: libmpv_dep)
     test('libmpv-encode', exe, suite: 'libmpv')
 
+    exe = executable('libmpv-test-audio-fft', 'libmpv_test_audio_fft.c',
+                     include_directories: incdir, dependencies: libmpv_dep)
+    test('libmpv-test-audio-fft', exe, suite: 'libmpv')
+
     mpvlib = libmpv
     shared = get_option('default_library') == 'shared'
     if get_option('default_library') == 'both'

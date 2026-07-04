@@ -1,11 +1,11 @@
 #ifndef MP_CLIENT_H_
 #define MP_CLIENT_H_
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-#include "mpv/stream_cb.h"
 #include "misc/bstr.h"
+#include "mpv/stream_cb.h"
 
 struct MPContext;
 struct mpv_handle;
@@ -29,9 +29,11 @@ int mp_client_send_event(struct MPContext *mpctx, const char *client_name,
 int mp_client_send_event_dup(struct MPContext *mpctx, const char *client_name,
                              int event, void *data);
 void mp_client_property_change(struct MPContext *mpctx, const char *name);
+bool mp_property_has_observers(struct MPContext *mpctx, const char *name);
 void mp_client_send_property_changes(struct MPContext *mpctx);
 
-struct mpv_handle *mp_new_client(struct mp_client_api *clients, const char *name);
+struct mpv_handle *mp_new_client(struct mp_client_api *clients,
+                                 const char *name);
 void mp_client_set_weak(struct mpv_handle *ctx);
 struct mp_log *mp_client_get_log(struct mpv_handle *ctx);
 struct mpv_global *mp_client_get_global(struct mpv_handle *ctx);
