@@ -17,6 +17,7 @@
 
 #include "libmpv_common.h"
 #include <stdint.h>
+#include <time.h>
 
 static void wait_for_playback(void) {
   bool finished = false;
@@ -157,6 +158,65 @@ static void test_audio_fft_no_observers(void) {
   printf("audio-fft no observers test passed!\n");
 }
 
+static void test_audio_fft_rate(void) {
+  mpv_observe_property(ctx, 0, "audio-fft", MPV_FORMAT_BYTE_ARRAY);
+
+  reload_file("/home/mpv/sine.wav");
+
+  int fft_count = 0;
+  bool finished = false;
+  struct timespec first_ts = {0};
+  struct timespec last_ts = {0};
+
+  while (!finished) {
+    mpv_event *event = wrap_wait_event();
+    switch (event->event_id) {
+    case MPV_EVENT_PROPERTY_CHANGE: {
+      mpv_event_property *prop = event->data;
+      if (strcmp(prop->name, "audio-fft") == 0) {
+        if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
+          mpv_byte_array *ba = prop->data;
+          if (ba && ba->data && ba->size > 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (fft_count == 0)
+              first_ts = now;
+            last_ts = now;
+            fft_count++;
+            printf("FFT frame %d at timestamp %ld.%09ld\n", fft_count,
+                   (long)now.tv_sec, now.tv_nsec);
+          }
+        }
+      }
+      break;
+    }
+    case MPV_EVENT_END_FILE:
+      finished = true;
+      break;
+    }
+  }
+
+  mpv_unobserve_property(ctx, 0);
+
+  if (fft_count < 3)
+    fail("Not enough FFT frames to measure rate: got %d\n", fft_count);
+
+  double elapsed = (last_ts.tv_sec - first_ts.tv_sec) +
+                   (last_ts.tv_nsec - first_ts.tv_nsec) / 1e9;
+  double actual_rate = (double)(fft_count - 1) / elapsed;
+  double expected_rate = 10.0;
+
+  printf("FFT frames: %d, elapsed: %.3f seconds, "
+         "actual rate: %.1f Hz, expected rate: %.1f Hz\n",
+         fft_count, elapsed, actual_rate, expected_rate);
+
+  if (actual_rate < expected_rate * 0.7 || actual_rate > expected_rate * 1.3)
+    fail("audio-fft rate mismatch: expected ~%.1f Hz, got %.1f Hz\n",
+         expected_rate, actual_rate);
+
+  printf("audio-fft rate test passed!\n");
+}
+
 int main(void) {
   ctx = mpv_create();
   if (!ctx)
@@ -180,6 +240,9 @@ int main(void) {
 
   printf(fmt, "test_audio_fft_no_observers");
   test_audio_fft_no_observers();
+
+  printf(fmt, "test_audio_fft_rate");
+  test_audio_fft_rate();
 
   printf("================ SHUTDOWN ================\n");
 
