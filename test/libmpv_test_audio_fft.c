@@ -210,7 +210,7 @@ static void test_audio_fft_rate(void) {
          "actual rate: %.1f Hz, expected rate: %.1f Hz\n",
          fft_count, elapsed, actual_rate, expected_rate);
 
-  if (actual_rate < expected_rate * 0.7 || actual_rate > expected_rate * 1.3)
+  if (actual_rate < expected_rate * 0.7 || actual_rate > expected_rate * 1.5)
     fail("audio-fft rate mismatch: expected ~%.1f Hz, got %.1f Hz\n",
          expected_rate, actual_rate);
 

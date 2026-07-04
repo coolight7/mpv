@@ -1017,49 +1017,39 @@ static void fft_complex(float *real, float *imag, int n, bool inverse) {
 }
 
 // Real FFT: compute magnitude spectrum from real input samples.
-// input: n real samples (n must be a power of 2)
-// output: n bytes, each scaled to [0, 255]
+// input: n real samples (n must be a power of 2), already windowed
+// output: n bytes, each scaled to [0, 255] via dB normalization
 static void audio_fft_real(const float *input, int n, uint8_t *output) {
-  int n2 = n / 2;
-  float *real = talloc_size(NULL, n2 * sizeof(float));
-  float *imag = talloc_size(NULL, n2 * sizeof(float));
-
-  for (int i = 0; i < n2; i++) {
-    real[i] = input[2 * i];
-    imag[i] = input[2 * i + 1];
-  }
-
-  fft_complex(real, imag, n2, false);
-
-  float *mag = talloc_size(NULL, n * sizeof(float));
-  float max_mag = 0.0f;
-
-  mag[0] = fabsf(real[0]);
-  mag[n2] = fabsf(imag[0]);
-
-  for (int i = 1; i < n2; i++) {
-    float re = (real[i] + real[n2 - i]) * 0.5f;
-    float im = (imag[i] - imag[n2 - i]) * 0.5f;
-    float m1 = sqrtf(re * re + im * im);
-    mag[i] = m1;
-    mag[n - i] = m1;
-    if (m1 > max_mag)
-      max_mag = m1;
-  }
-
-  if (max_mag < 1e-10f)
-    max_mag = 1.0f;
+  float *real = talloc_size(NULL, n * sizeof(float));
+  float *imag = talloc_size(NULL, n * sizeof(float));
 
   for (int i = 0; i < n; i++) {
-    float val = mag[i] / max_mag * 255.0f;
-    if (val > 255.0f)
-      val = 255.0f;
-    output[i] = (uint8_t)val;
+    real[i] = input[i];
+    imag[i] = 0.0f;
+  }
+
+  fft_complex(real, imag, n, false);
+
+  const float db_min = -80.0f;
+  const float db_max = 0.0f;
+  const float db_range = db_max - db_min;
+
+  for (int i = 0; i < n; i++) {
+    float mag = sqrtf(real[i] * real[i] + imag[i] * imag[i]);
+
+    float norm = (i == 0 || i == n / 2) ? mag / (float)n : mag / (float)(n / 2);
+
+    float db = 20.0f * log10f(norm + 1e-10f);
+    float linear = (db - db_min) / db_range;
+    if (linear < 0.0f)
+      linear = 0.0f;
+    if (linear > 1.0f)
+      linear = 1.0f;
+    output[i] = (uint8_t)(linear * 255.0f);
   }
 
   talloc_free(real);
   talloc_free(imag);
-  talloc_free(mag);
 }
 
 // Capture audio samples from an audio frame for FFT visualization.
