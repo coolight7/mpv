@@ -708,7 +708,7 @@ static const m_option_t mp_opts[] = {
     {"audio-pitch-correction", OPT_BOOL(pitch_correction)},
 
     {"audio-fft-rate", OPT_INT(audio_fft_rate), M_RANGE(1, 100)},
-    {"audio-fft-size", OPT_INT(audio_fft_size), M_RANGE(64, 4096)},
+    {"audio-fft-size", OPT_INT(audio_fft_size), M_RANGE(1, 256)},
 
     // set a-v distance
     {"audio-delay", OPT_FLOAT(audio_delay)},

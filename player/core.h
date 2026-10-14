@@ -473,24 +473,30 @@ typedef struct MPContext {
   struct mp_als *als_state; // lazily initialized on first use
 
   // audio FFT visualization (see the audio_fft_* functions in audio.c)
-  float *audio_fft_buffer;       // ring buffer with the last mono samples
+  float *audio_fft_buffer;       // ring buffer: last mono samples, two frames
+                                 // plus room for the audio output delay
   int audio_fft_buffer_size;     // ring buffer capacity in samples
   int audio_fft_buffer_pos;      // next write position in the ring buffer
+  int audio_fft_span;            // samples of one frame (sample rate / rate)
+  int audio_fft_fft_size;        // transform length (power of two, <= span)
+  int audio_fft_sample_rate;     // sample rate the buffers were built for
+  float *audio_fft_frame;        // newest window, fft_size samples
+  int64_t audio_fft_written;     // samples written since the last reset
   int64_t audio_fft_captured;    // samples captured since the last compute
   uint8_t *audio_fft_output;     // spectrum (audio_fft_output_size bytes)
   int audio_fft_output_size;     // size of the spectrum in bytes
   bool audio_fft_output_valid;   // whether the spectrum has valid data
-  double audio_fft_last_time;    // time the spectrum was computed last
-  // tables and work buffers for audio_fft_table_size, they are built only
-  // when the audio-fft-size option changes
-  int audio_fft_table_size;      // FFT size the tables below belong to
+  double audio_fft_next_time;    // when the next spectrum is due (0 = none)
+  // tables and work buffers for audio_fft_fft_size, they are built only when
+  // the sample rate or the audio-fft-rate option changes
+  int audio_fft_bin_count;       // bins the transform provides (fft_size/2)
   int *audio_fft_bit_reverse;    // bit reversal order, fft_size entries
   float *audio_fft_twiddle;      // twiddle factors (cos, -sin)
   float *audio_fft_window;       // window coefficients, fft_size entries
   float *audio_fft_real;         // FFT work buffer, fft_size entries
   float *audio_fft_imag;         // FFT work buffer, fft_size entries
-  float audio_fft_mag_scale_dc;  // 1/n, for the DC and the Nyquist bin
-  float audio_fft_mag_scale_ac;  // 2/n, for every other bin
+  float audio_fft_mag_scale_dc;  // 1/fft_size, for the DC bin
+  float audio_fft_mag_scale_ac;  // 2/fft_size, for every other bin
 } MPContext;
 
 // Contains information about an asynchronous work item, how it can be aborted,

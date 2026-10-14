@@ -49,6 +49,11 @@ enum {
 
 static void ao_process(struct mp_filter *f);
 
+// Drops the samples that were collected for the realtime spectrum (defined at
+// the end of this file, next to the rest of the audio_fft_* functions).
+static void audio_fft_reset_capture(struct MPContext *mpctx);
+static void audio_fft_init_tables(struct MPContext *mpctx, int fft_size);
+
 static void update_speed_filters(struct MPContext *mpctx) {
   struct ao_chain *ao_c = mpctx->ao_chain;
   if (!ao_c)
@@ -226,6 +231,8 @@ void reset_audio_state(struct MPContext *mpctx) {
   mpctx->audio_status = mpctx->ao_chain ? STATUS_SYNCING : STATUS_EOF;
   mpctx->delay = 0;
   mpctx->logged_async_diff = -1;
+  // The collected spectrum samples belong to the old playback position.
+  audio_fft_reset_capture(mpctx);
 }
 
 void uninit_audio_out(struct MPContext *mpctx) {
@@ -955,23 +962,156 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // ---------------------------------------------------------------------------
 // Realtime audio spectrum for visualization ("audio-fft" property)
 //
-// Every audio frame that is handed to the audio output is mixed down to mono
-// and appended to a ring buffer. At most audio-fft-rate times per second the
-// last audio-fft-size samples are taken out of the ring buffer, multiplied
-// with a Hann window and turned into a spectrum with an FFT. The magnitudes
-// are mapped from -80 dB .. 0 dB onto 0 .. 255 and published through the
-// "audio-fft" property as audio-fft-size bytes (bin 0 is the DC part, the
-// upper half mirrors the lower half).
+// The property publishes audio-fft-size bytes: -80 dB .. 0 dB mapped to
+// 0 .. 255, the same format as the batch extraction the app uses for whole
+// files (mediaxx). The published bytes are display bands, not single FFT bins:
+// band i covers the frequency range from AUDIO_FFT_BAND_EDGES[i] to
+// AUDIO_FFT_BAND_EDGES[i + 1] Hz (see the table below), so with the defaults
+// (rate 10, size 256) one frame covers 1/10 second and the bands tile
+// 0 .. 20 kHz. The level of a band is the combined level of the FFT bins inside
+// it, which keeps the value a pure tone produces the same as when the bin was
+// published on its own.
 //
-// The tables (window, twiddle factors, bit reversal order) and the work
-// buffers are built once per FFT size, so publishing a frame neither
-// allocates memory nor calls trigonometric functions in a loop.
+// Each frame is transformed on its own: the newest window of samples that
+// still fits into one frame (a power of two, 4096 samples at 44.1 kHz, which
+// is 93 ms) is multiplied with a Hann window and transformed with a FFT of
+// that length. The bins of that transform are rate/fft_size Hz wide (11 Hz at
+// 44.1 kHz), which is what the bands are built from. An earlier version
+// averaged the frame down to 2*size samples first and used those as the
+// transform input; that only covered size * rate / rate_hz Hz (2.5 kHz with
+// the defaults) and folded everything above it back into the low bands, so
+// cymbals and other high content showed up in the wrong bands.
+//
+// Samples are collected from the audio frames that go to the audio output,
+// before the audio output applies its gain (see ao_post_process_data(), which
+// runs when the output takes a frame out of its queue), and that is also why
+// this works for every source, not only local files (the batch extraction
+// needs the file). Because that point runs ahead of the sound, the window is
+// taken around the position that is played now: the audio the output has
+// queued but not played yet is left out (see ao_get_delay(), the same delay
+// playing_audio_pts() uses). Without that, the spectrum would lead the sound
+// by the queued amount, about 0.4 seconds with the null output. The tables and
+// buffers are built once per size and rate, so publishing a frame does not
+// allocate memory or call trigonometric functions in a loop. The levels
+// therefore describe the audio and not the volume: the volume, volume-gain and
+// mute settings all change the sound after this point, so a muted player still
+// shows the running spectrum, like the batch extraction of a file does (it
+// does not know the volume either).
 // ---------------------------------------------------------------------------
 
-// How many FFT frames the ring buffer keeps. Only the newest fft_size samples
-// are used, the rest makes sure that no samples are lost between two compute
-// steps.
-#define AUDIO_FFT_RING_FRAMES 4
+// The published bands, as their edges in Hz: band i covers
+// [AUDIO_FFT_BAND_EDGES[i], AUDIO_FFT_BAND_EDGES[i + 1]).
+//
+// The layout is what an equalizer looks like, with the low end limited by what
+// the analysis window can still separate: a fixed 40 Hz step up to 3.84 kHz
+// (about three FFT bins at 44.1 kHz and at 48 kHz, so the level of a band does
+// not jump when the number of bins inside it changes), then a fixed step of
+// 1.04 percent per band up to 20 kHz, which is a fixed number of bands per
+// octave at the top (about 67) instead of a fixed number of Hz.
+//
+// Keep this table and the one in mediaxx (src/lib/analyse/audio_visualization.h)
+// identical: the batch extraction and this property have to agree.
+static const int AUDIO_FFT_BAND_EDGES[] = {
+    0, 40, 80, 120, 160, 200, 240, 280, 320, 360,
+    400, 440, 480, 520, 560, 600, 640, 680, 720, 760,
+    800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160,
+    1200, 1240, 1280, 1320, 1360, 1400, 1440, 1480, 1520, 1560,
+    1600, 1640, 1680, 1720, 1760, 1800, 1840, 1880, 1920, 1960,
+    2000, 2040, 2080, 2120, 2160, 2200, 2240, 2280, 2320, 2360,
+    2400, 2440, 2480, 2520, 2560, 2600, 2640, 2680, 2720, 2760,
+    2800, 2840, 2880, 2920, 2960, 3000, 3040, 3080, 3120, 3160,
+    3200, 3240, 3280, 3320, 3360, 3400, 3440, 3480, 3520, 3560,
+    3600, 3640, 3680, 3720, 3760, 3800, 3840, 3880, 3920, 3960,
+    4000, 4040, 4090, 4130, 4170, 4210, 4260, 4300, 4350, 4390,
+    4440, 4480, 4530, 4580, 4620, 4670, 4720, 4770, 4820, 4870,
+    4920, 4970, 5020, 5070, 5130, 5180, 5230, 5290, 5340, 5400,
+    5450, 5510, 5570, 5620, 5680, 5740, 5800, 5860, 5920, 5980,
+    6050, 6110, 6170, 6240, 6300, 6370, 6430, 6500, 6570, 6630,
+    6700, 6770, 6840, 6910, 6980, 7060, 7130, 7200, 7280, 7350,
+    7430, 7510, 7590, 7660, 7740, 7820, 7900, 7990, 8070, 8150,
+    8240, 8320, 8410, 8500, 8580, 8670, 8760, 8850, 8950, 9040,
+    9130, 9230, 9320, 9420, 9520, 9620, 9720, 9820, 9920, 10000,
+    10100, 10200, 10300, 10400, 10600, 10700, 10800, 10900, 11000, 11100,
+    11200, 11300, 11500, 11600, 11700, 11800, 11900, 12100, 12200, 12300,
+    12400, 12600, 12700, 12800, 13000, 13100, 13200, 13400, 13500, 13700,
+    13800, 13900, 14100, 14200, 14400, 14500, 14700, 14800, 15000, 15100,
+    15300, 15500, 15600, 15800, 15900, 16100, 16300, 16400, 16600, 16800,
+    17000, 17100, 17300, 17500, 17700, 17900, 18000, 18200, 18400, 18600,
+    18800, 19000, 19200, 19400, 19600, 19800, 20000
+};
+
+#define AUDIO_FFT_BANDS (MP_ARRAY_SIZE(AUDIO_FFT_BAND_EDGES) - 1)
+
+// Longest audio delay in the audio output that the capture buffer keeps room
+// for, in seconds. The output was already given this much audio that is not
+// heard yet, and the spectrum is taken from the samples around the position
+// that is heard now. A playback device usually queues a few tenths of a
+// second; the value only has to cover that.
+#define AUDIO_FFT_DELAY_MAX 0.6
+
+// The spectrum is built from the samples that go to the audio output; those
+// belong to the playback position they were taken from.
+static void audio_fft_reset_capture(struct MPContext *mpctx) {
+  mpctx->audio_fft_buffer_pos = 0;
+  mpctx->audio_fft_written = 0;
+  mpctx->audio_fft_captured = 0;
+}
+
+static void audio_fft_free_capture(struct MPContext *mpctx) {
+  talloc_free(mpctx->audio_fft_buffer);
+  talloc_free(mpctx->audio_fft_frame);
+  talloc_free(mpctx->audio_fft_output);
+  mpctx->audio_fft_buffer = NULL;
+  mpctx->audio_fft_frame = NULL;
+  mpctx->audio_fft_output = NULL;
+  mpctx->audio_fft_buffer_size = 0;
+  mpctx->audio_fft_span = 0;
+  mpctx->audio_fft_fft_size = 0;
+  mpctx->audio_fft_sample_rate = 0;
+  mpctx->audio_fft_output_size = 0;
+  mpctx->audio_fft_output_valid = false;
+  mpctx->audio_fft_next_time = 0;
+  audio_fft_reset_capture(mpctx);
+}
+
+// Make sure the capture buffers fit the sample rate and the column count.
+static void audio_fft_update_capture(struct MPContext *mpctx, int sample_rate,
+                                     int bin_count) {
+  int span = sample_rate / mpctx->opts->audio_fft_rate;
+  if (span <= 0)
+    return;
+
+  // The transform length is the largest power of two that fits into one
+  // frame, so the window never reaches further back than one frame and the
+  // covered range (sample_rate/2) still includes the last band edge.
+  int fft_size = 1;
+  while (fft_size * 2 <= span)
+    fft_size *= 2;
+  if (fft_size < 64)
+    fft_size = 64;
+
+  if (mpctx->audio_fft_span == span && mpctx->audio_fft_fft_size == fft_size &&
+      mpctx->audio_fft_sample_rate == sample_rate &&
+      mpctx->audio_fft_output_size == bin_count)
+    return;
+
+  audio_fft_free_capture(mpctx);
+  mpctx->audio_fft_span = span;
+  mpctx->audio_fft_fft_size = fft_size;
+  mpctx->audio_fft_sample_rate = sample_rate;
+  // The buffer keeps two frames: one is published, the next one is being
+  // filled, and the window of a frame sits inside a frame. The extra room
+  // holds the audio the output was given but has not played yet, so the
+  // window can be taken from the samples that are heard now.
+  mpctx->audio_fft_buffer_size =
+      span * 2 + (int)(AUDIO_FFT_DELAY_MAX * sample_rate) + 1;
+  mpctx->audio_fft_buffer = talloc_array(mpctx, float, mpctx->audio_fft_buffer_size);
+  mpctx->audio_fft_frame = talloc_array(mpctx, float, fft_size);
+  mpctx->audio_fft_output = talloc_array(mpctx, uint8_t, bin_count);
+  mpctx->audio_fft_output_size = bin_count;
+
+  audio_fft_init_tables(mpctx, fft_size);
+}
 
 static void audio_fft_free_tables(struct MPContext *mpctx) {
   talloc_free(mpctx->audio_fft_bit_reverse);
@@ -984,11 +1124,13 @@ static void audio_fft_free_tables(struct MPContext *mpctx) {
   mpctx->audio_fft_window = NULL;
   mpctx->audio_fft_real = NULL;
   mpctx->audio_fft_imag = NULL;
-  mpctx->audio_fft_table_size = 0;
+  mpctx->audio_fft_bin_count = 0;
 }
 
-// Build the tables for the given FFT size (a power of 2).
-static void audio_fft_init_tables(struct MPContext *mpctx, int n) {
+// Build the tables for the given transform length.
+static void audio_fft_init_tables(struct MPContext *mpctx, int fft_size) {
+  int n = fft_size;
+
   audio_fft_free_tables(mpctx);
 
   mpctx->audio_fft_bit_reverse = talloc_array(mpctx, int, n);
@@ -1024,12 +1166,12 @@ static void audio_fft_init_tables(struct MPContext *mpctx, int n) {
         0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)(n - 1)));
   }
 
-  // The transform sums n samples, so a full scale sine (amplitude 1) has a
-  // magnitude of n/2, and n for the DC and the Nyquist bin.
+  // The transformed bins are sums over n samples, so a full scale sine
+  // (amplitude 1) has a magnitude of n/2 and the DC part a magnitude of n.
   mpctx->audio_fft_mag_scale_dc = 1.0f / (float)n;
   mpctx->audio_fft_mag_scale_ac = 2.0f / (float)n;
 
-  mpctx->audio_fft_table_size = n;
+  mpctx->audio_fft_bin_count = n / 2;
 }
 
 // In-place radix-2 FFT. audio_fft_real[] holds the input samples, fft_imag[]
@@ -1074,12 +1216,65 @@ static void audio_fft_run(struct MPContext *mpctx, int n) {
   }
 }
 
-// Map one magnitude to a byte between 0 and 255.
-static inline uint8_t audio_fft_to_byte(float re, float im, float scale) {
+// Apply the window to the newest frame and transform it.
+static void audio_fft_analyze(struct MPContext *mpctx) {
+  int n = mpctx->audio_fft_fft_size;
+  const float *frame = mpctx->audio_fft_frame;
+  const float *window = mpctx->audio_fft_window;
+  float *real = mpctx->audio_fft_real;
+  float *imag = mpctx->audio_fft_imag;
+
+  for (int i = 0; i < n; i++) {
+    real[i] = frame[i] * window[i];
+    imag[i] = 0.0f;
+  }
+
+  audio_fft_run(mpctx, n);
+}
+
+// Level of one band as a byte between 0 and 255.
+//
+// The bins of the band are added as levels (their squares), each counted with
+// the share of its width that falls into the band. Counting whole bins instead
+// would make a band measure 3 or 4 bins depending on where its edges land on
+// the bin grid: the level would step by about 1 dB between neighbouring bands,
+// and the same band would be measured differently at 44.1 kHz and at 48 kHz.
+// With the shares, every band of the table measures exactly its own frequency
+// width, whatever the sample rate is.
+//
+// A sine keeps the level a single published bin had, because the band around it
+// holds the three bins the window spreads a tone over.
+static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
+                                             double f1, int sample_rate) {
+  const float *real = mpctx->audio_fft_real;
+  const float *imag = mpctx->audio_fft_imag;
   const float db_min = -80.0f;
   const float db_range = 80.0f;
+  float scale_dc2 = mpctx->audio_fft_mag_scale_dc * mpctx->audio_fft_mag_scale_dc;
+  float scale_ac2 = mpctx->audio_fft_mag_scale_ac * mpctx->audio_fft_mag_scale_ac;
+  int usable = mpctx->audio_fft_bin_count; // bins the transform provides
+  double bin_hz = (double)sample_rate / (double)mpctx->audio_fft_fft_size;
+  int first = (int)floor(f0 / bin_hz) - 1;
+  int last = (int)ceil(f1 / bin_hz) + 1;
+  float sum = 0.0f;
 
-  float magnitude = sqrtf(re * re + im * im) * scale;
+  if (first < 0)
+    first = 0;
+  if (last > usable)
+    last = usable;
+
+  for (int i = first; i < last; i++) {
+    // Bin i covers [i - 0.5, i + 0.5] bin widths; its share is the part of
+    // that range which overlaps the band.
+    double share = MPMIN((i + 0.5) * bin_hz, f1) - MPMAX((i - 0.5) * bin_hz, f0);
+    if (share <= 0.0)
+      continue;
+    float scale2 = i ? scale_ac2 : scale_dc2;
+    sum += (real[i] * real[i] + imag[i] * imag[i]) * scale2 *
+           (float)(share / bin_hz);
+  }
+
+  float magnitude = sqrtf(sum);
   float db = 20.0f * log10f(magnitude + 1e-10f);
   float level = (db - db_min) / db_range;
   if (level < 0.0f)
@@ -1089,23 +1284,30 @@ static inline uint8_t audio_fft_to_byte(float re, float im, float scale) {
   return (uint8_t)(level * 255.0f);
 }
 
-// Turn the transformed samples into the byte spectrum.
-static void audio_fft_to_bytes(struct MPContext *mpctx, int n) {
-  const float *real = mpctx->audio_fft_real;
-  const float *imag = mpctx->audio_fft_imag;
+// How many bands are published: the option picks a prefix of the table.
+static int audio_fft_band_count(struct MPContext *mpctx) {
+  int count = mpctx->opts->audio_fft_size;
+  return count > AUDIO_FFT_BANDS ? AUDIO_FFT_BANDS : count;
+}
+
+// Turn the transformed samples into the byte spectrum: one byte per band of
+// AUDIO_FFT_BAND_EDGES, from 0 Hz up.
+static void audio_fft_to_bytes(struct MPContext *mpctx, int bin_count) {
   uint8_t *output = mpctx->audio_fft_output;
+  int sample_rate = mpctx->audio_fft_sample_rate;
 
-  output[0] =
-      audio_fft_to_byte(real[0], imag[0], mpctx->audio_fft_mag_scale_dc);
-  for (int i = 1; i < n / 2; i++)
-    output[i] =
-        audio_fft_to_byte(real[i], imag[i], mpctx->audio_fft_mag_scale_ac);
-  output[n / 2] = audio_fft_to_byte(real[n / 2], imag[n / 2],
-                                    mpctx->audio_fft_mag_scale_dc);
+  if (!bin_count || !mpctx->audio_fft_fft_size || sample_rate <= 0) {
+    memset(output, 0, bin_count);
+    return;
+  }
+  if (bin_count > AUDIO_FFT_BANDS)
+    bin_count = AUDIO_FFT_BANDS;
 
-  // Bins above the Nyquist frequency mirror the ones below.
-  for (int i = 1; i < n / 2; i++)
-    output[n - i] = output[i];
+  for (int i = 0; i < bin_count; i++) {
+    output[i] = audio_fft_band_to_byte(mpctx, (double)AUDIO_FFT_BAND_EDGES[i],
+                                       (double)AUDIO_FFT_BAND_EDGES[i + 1],
+                                       sample_rate);
+  }
 }
 
 // Mix one audio frame down to mono and append it to the ring buffer.
@@ -1116,31 +1318,20 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
   if (!mp_property_has_observers(mpctx, "audio-fft"))
     return;
 
-  int fft_size = mpctx->opts->audio_fft_size;
-  int buf_size = fft_size * AUDIO_FFT_RING_FRAMES;
-
-  if (mpctx->audio_fft_buffer_size != buf_size) {
-    talloc_free(mpctx->audio_fft_buffer);
-    talloc_free(mpctx->audio_fft_output);
-    mpctx->audio_fft_buffer = talloc_array(mpctx, float, buf_size);
-    mpctx->audio_fft_buffer_size = buf_size;
-    mpctx->audio_fft_buffer_pos = 0;
-    mpctx->audio_fft_captured = 0;
-    mpctx->audio_fft_output = talloc_array(mpctx, uint8_t, fft_size);
-    mpctx->audio_fft_output_size = fft_size;
-    mpctx->audio_fft_output_valid = false;
-    mpctx->audio_fft_last_time = 0;
-  }
-
   int samples = mp_aframe_get_size(aframe);
   int channels = mp_aframe_get_channels(aframe);
+  int sample_rate = mp_aframe_get_rate(aframe);
   int format = mp_aframe_get_format(aframe);
   uint8_t **planes = mp_aframe_get_data_ro(aframe);
 
-  if (samples <= 0 || channels <= 0 || !planes || !planes[0])
+  if (samples <= 0 || channels <= 0 || sample_rate <= 0 || !planes || !planes[0])
     return;
   if (!af_fmt_is_valid(format) ||
       (!af_fmt_is_float(format) && !af_fmt_is_int(format)))
+    return;
+
+  audio_fft_update_capture(mpctx, sample_rate, audio_fft_band_count(mpctx));
+  if (!mpctx->audio_fft_buffer)
     return;
 
   bool planar = af_fmt_is_planar(format);
@@ -1191,73 +1382,93 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
   }
 
   mpctx->audio_fft_buffer_pos = pos;
+  mpctx->audio_fft_written += samples;
   mpctx->audio_fft_captured += samples;
 }
 
 // Compute the spectrum from the collected samples. Called from the play loop,
 // the rate is limited by the audio-fft-rate option.
 void audio_fft_compute(struct MPContext *mpctx) {
-  if (!mpctx->opts->audio_fft_rate || !mpctx->opts->audio_fft_size)
+  struct MPOpts *opts = mpctx->opts;
+
+  if (!opts->audio_fft_rate || !opts->audio_fft_size)
     return;
 
-  // Nothing was captured since the last spectrum, there is no new data to
-  // publish (this also covers paused playback).
-  if (!mpctx->audio_fft_buffer || !mpctx->audio_fft_buffer_size ||
-      !mpctx->audio_fft_captured)
+  // Wait until a whole frame was captured (a frame is 1/audio-fft-rate
+  // seconds long), and skip if nothing new arrived since the last spectrum
+  // (this also covers paused playback).
+  int span = mpctx->audio_fft_span;
+  if (!mpctx->audio_fft_buffer || span <= 0 ||
+      mpctx->audio_fft_written < span || !mpctx->audio_fft_captured) {
     return;
+  }
 
-  double interval = 1.0 / (double)mpctx->opts->audio_fft_rate;
+  // One frame every 1/audio-fft-rate seconds. The deadline is carried over
+  // from the previous frame instead of starting from "now", so the rate does
+  // not drift with the granularity of the play loop (a frame per pass would
+  // give a lower rate than configured). A deadline that fell behind (pause,
+  // long gap) starts over instead of catching up in a burst.
+  double interval = 1.0 / (double)opts->audio_fft_rate;
   double now = mp_time_sec();
-  if (mpctx->audio_fft_last_time != 0 &&
-      now - mpctx->audio_fft_last_time < interval)
+  if (mpctx->audio_fft_next_time != 0 && now < mpctx->audio_fft_next_time) {
     return;
+  }
 
   if (!mp_property_has_observers(mpctx, "audio-fft"))
     return;
 
-  int n = mpctx->opts->audio_fft_size;
-  if (mpctx->audio_fft_table_size != n)
-    audio_fft_init_tables(mpctx, n);
+  int bin_count = audio_fft_band_count(mpctx);
+  int fft_size = mpctx->audio_fft_fft_size;
 
-  // Take the newest n samples out of the ring buffer and apply the window.
-  float *real = mpctx->audio_fft_real;
-  float *imag = mpctx->audio_fft_imag;
-  const float *window = mpctx->audio_fft_window;
+  // The audio output was already handed the audio of the next few tenths of a
+  // second, which is not heard yet. Take the window from the position that is
+  // heard now (playing_audio_pts() subtracts the same delay), otherwise the
+  // spectrum would run ahead of the sound by that amount.
+  int64_t delay = 0;
+  if (mpctx->ao) {
+    double delay_sec = ao_get_delay(mpctx->ao);
+    if (delay_sec > 0)
+      delay = (int64_t)(delay_sec * mpctx->audio_fft_sample_rate);
+  }
+  // never reach behind the samples the ring buffer still holds
+  int64_t oldest = mpctx->audio_fft_buffer_size - fft_size;
+  if (delay > oldest)
+    delay = oldest;
+  if (delay > mpctx->audio_fft_written - fft_size)
+    delay = mpctx->audio_fft_written - fft_size;
+  if (delay < 0)
+    delay = 0;
+
+  // Take the window out of the ring buffer.
+  float *frame = mpctx->audio_fft_frame;
   const float *buffer = mpctx->audio_fft_buffer;
   int size = mpctx->audio_fft_buffer_size;
-  int start = mpctx->audio_fft_buffer_pos - n;
+  int start = mpctx->audio_fft_buffer_pos - fft_size - (int)delay;
   if (start < 0)
     start += size;
-
   int first = size - start;
-  if (first > n)
-    first = n;
-  for (int i = 0; i < first; i++)
-    real[i] = buffer[start + i] * window[i];
-  for (int i = first; i < n; i++)
-    real[i] = buffer[i - first] * window[i];
-  memset(imag, 0, n * sizeof(float));
+  if (first > fft_size)
+    first = fft_size;
+  memcpy(frame, buffer + start, first * sizeof(float));
+  if (first < fft_size)
+    memcpy(frame + first, buffer, (fft_size - first) * sizeof(float));
 
-  audio_fft_run(mpctx, n);
-  audio_fft_to_bytes(mpctx, n);
+  audio_fft_analyze(mpctx);
+  audio_fft_to_bytes(mpctx, bin_count);
 
   mpctx->audio_fft_output_valid = true;
   mpctx->audio_fft_captured = 0;
-  mpctx->audio_fft_last_time = now;
+  if (mpctx->audio_fft_next_time == 0 ||
+      now - mpctx->audio_fft_next_time > interval) {
+    mpctx->audio_fft_next_time = now + interval;
+  } else {
+    mpctx->audio_fft_next_time += interval;
+  }
 
   mp_notify_property(mpctx, "audio-fft");
 }
 
 void audio_fft_uninit(struct MPContext *mpctx) {
   audio_fft_free_tables(mpctx);
-  talloc_free(mpctx->audio_fft_buffer);
-  talloc_free(mpctx->audio_fft_output);
-  mpctx->audio_fft_buffer = NULL;
-  mpctx->audio_fft_buffer_size = 0;
-  mpctx->audio_fft_buffer_pos = 0;
-  mpctx->audio_fft_captured = 0;
-  mpctx->audio_fft_output = NULL;
-  mpctx->audio_fft_output_size = 0;
-  mpctx->audio_fft_output_valid = false;
-  mpctx->audio_fft_last_time = 0;
+  audio_fft_free_capture(mpctx);
 }

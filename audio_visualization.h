@@ -1,3 +1,9 @@
+// Reference copy of the whole file extractor the app uses (mediaxx), kept next
+// to the realtime implementation for reading. It is NOT the version in use and
+// no longer matches it: the extractor now publishes the same 256 frequency
+// bands as player/audio.c does (see AUDIO_FFT_BAND_EDGES there) instead of
+// averaging a frame down to 512 bins. The file in use is
+// mediaxx/src/lib/analyse/audio_visualization.h.
 #pragma once
 
 extern "C" {
