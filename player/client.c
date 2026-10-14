@@ -176,6 +176,42 @@ static void prop_unref(struct observe_property *prop) {
     talloc_free(prop);
 }
 
+// The value of an observed property with the client API format
+// MPV_FORMAT_BYTE_ARRAY is a struct mpv_byte_array that owns its data
+// allocation (see getproperty_fn()). m_option_free() cannot release it,
+// because it would interpret the value as a struct mpv_node, so the helpers
+// below take care of it.
+static struct mpv_byte_array *byte_array_value(union m_option_value *value) {
+  return (struct mpv_byte_array *)value;
+}
+
+static void byte_array_value_free(union m_option_value *value) {
+  struct mpv_byte_array *ba = byte_array_value(value);
+  talloc_free(ba->data);
+  *ba = (struct mpv_byte_array){0};
+}
+
+static void byte_array_value_copy(union m_option_value *dst,
+                                  union m_option_value *src) {
+  const struct mpv_byte_array *s = (const struct mpv_byte_array *)src;
+  struct mpv_byte_array copy = {
+      .size = s->size,
+      .data = (s->data && s->size) ? talloc_memdup(NULL, s->data, s->size)
+                                   : NULL,
+  };
+  byte_array_value_free(dst);
+  *byte_array_value(dst) = copy;
+}
+
+// Release a value read for an observed property.
+static void observe_value_free(const struct observe_property *prop,
+                               union m_option_value *value) {
+  if (prop->format == MPV_FORMAT_BYTE_ARRAY)
+    byte_array_value_free(value);
+  else
+    m_option_free(prop->type, value);
+}
+
 void mp_clients_init(struct MPContext *mpctx) {
   mpctx->clients = talloc_ptrtype(NULL, mpctx->clients);
   *mpctx->clients = (struct mp_client_api){
@@ -1377,6 +1413,12 @@ static void getproperty_fn(void *arg) {
       if (node.format == MPV_FORMAT_BYTE_ARRAY) {
         struct mpv_byte_array *dst = data;
         *dst = *node.u.ba;
+        // The caller owns the data and releases it with mpv_free(). It was a
+        // child of the byte array struct (see mp_property_audio_fft() in
+        // command.c), so move it out before the struct is freed.
+        if (dst->data)
+          dst->data = talloc_steal(NULL, dst->data);
+        talloc_free(node.u.ba);
       } else {
         err = M_PROPERTY_INVALID_FORMAT;
         mpv_free_node_contents(&node);
@@ -1470,8 +1512,13 @@ static void property_free(void *p) {
   mp_assert(prop->refcount == 0);
 
   if (prop->type) {
-    m_option_free(prop->type, &prop->value);
-    m_option_free(prop->type, &prop->value_ret);
+    if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
+      byte_array_value_free(&prop->value);
+      byte_array_value_free(&prop->value_ret);
+    } else {
+      m_option_free(prop->type, &prop->value);
+      m_option_free(prop->type, &prop->value_ret);
+    }
   }
 }
 
@@ -1666,33 +1713,34 @@ static void send_client_property_changes(struct mpv_handle *ctx) {
       // Set if observed properties was changed or something similar
       // => start over, retry next time.
       if (cur_ts != ctx->properties_change_ts || ctx->destroying) {
-        m_option_free(type, &val);
+        observe_value_free(prop, &val);
         mp_wakeup_core(ctx->mpctx);
         ctx->has_pending_properties = true;
         break;
       }
       mp_assert(prop->refcount > 0);
 
+      bool is_byte_array = prop->format == MPV_FORMAT_BYTE_ARRAY;
       bool val_valid = req.status >= 0;
-      if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
-        changed = true;
-      } else {
-        changed = prop->value_valid != val_valid;
-        if (prop->value_valid && val_valid)
-          changed = !equal_mpv_value(&prop->value, &val, prop->format);
-      }
+      changed = prop->value_valid != val_valid;
+      if (prop->value_valid && val_valid)
+        changed = !equal_mpv_value(&prop->value, &val, prop->format);
       if (prop->value_ts == 0)
         changed = true; // initial event
 
       prop->value_valid = val_valid;
       if (changed && val_valid) {
         // move val to prop->value
-        m_option_free(type, &prop->value);
-        memcpy(&prop->value, &val, type->type->size);
+        observe_value_free(prop, &prop->value);
+        if (is_byte_array) {
+          prop->value = val;
+        } else {
+          memcpy(&prop->value, &val, type->type->size);
+        }
         memset(&val, 0, type->type->size);
       }
 
-      m_option_free(prop->type, &val);
+      observe_value_free(prop, &val);
     } else {
       changed = true;
     }
@@ -1773,7 +1821,9 @@ static bool gen_property_change_event(struct mpv_handle *ctx) {
 
       if (prop->value_valid) {
         if (prop->format == MPV_FORMAT_BYTE_ARRAY) {
-          memcpy(&prop->value_ret, &prop->value, sizeof(struct mpv_byte_array));
+          // Give the API user a copy of its own. It stays valid until the
+          // next event is generated for this property.
+          byte_array_value_copy(&prop->value_ret, &prop->value);
         } else {
           m_option_copy(prop->type, &prop->value_ret, &prop->value);
         }

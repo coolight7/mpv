@@ -16,6 +16,7 @@
  */
 
 #include "libmpv_common.h"
+#include <math.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -149,6 +150,85 @@ static void test_audio_fft_read_property(void) {
   printf("audio-fft read_property test passed!\n");
 }
 
+// The spectrum has to have the expected shape: the strongest bin sits at the
+// frequency of the test tone, the upper half mirrors the lower half, and the
+// data read with mpv_get_property() belongs to the caller.
+static void test_audio_fft_spectrum(void) {
+  const int fft_size = 512;
+  const double expected_freq = 440.0; // the tone in sine.wav
+  const double sample_rate = 44100.0;
+
+  int64_t size = fft_size;
+  mpv_set_property(ctx, "audio-fft-size", MPV_FORMAT_INT64, &size);
+  mpv_observe_property(ctx, 0, "audio-fft", MPV_FORMAT_BYTE_ARRAY);
+
+  reload_file("/home/mpv/sine.wav");
+
+  int frames = 0, peak_sum = 0, peak_frames = 0;
+  bool finished = false;
+  while (!finished) {
+    mpv_event *event = wrap_wait_event();
+    if (event->event_id == MPV_EVENT_END_FILE)
+      break;
+    if (event->event_id != MPV_EVENT_PROPERTY_CHANGE)
+      continue;
+    mpv_event_property *prop = event->data;
+    if (strcmp(prop->name, "audio-fft") != 0)
+      continue;
+    // the first event is sent before the first spectrum exists
+    if (prop->format != MPV_FORMAT_BYTE_ARRAY)
+      continue;
+    mpv_byte_array *ba = prop->data;
+    if (!ba || !ba->data || !ba->size)
+      continue;
+    if (ba->size != (size_t)fft_size)
+      fail("audio-fft: size %zu, expected %d\n", ba->size, fft_size);
+
+    const uint8_t *bytes = ba->data;
+    for (int i = 1; i < fft_size / 2; i++) {
+      if (bytes[fft_size - i] != bytes[i])
+        fail("audio-fft: bin %d does not mirror bin %d\n", fft_size - i, i);
+    }
+
+    // skip the first frames, the ring buffer is not filled up at the start
+    if (frames >= 3) {
+      int peak = 0;
+      for (int i = 1; i < fft_size / 2; i++) {
+        if (bytes[i] > bytes[peak])
+          peak = i;
+      }
+      peak_sum += peak;
+      peak_frames++;
+    }
+    frames++;
+
+    // the buffer of mpv_get_property() is owned by the caller
+    if (frames == 4) {
+      mpv_byte_array data = {0};
+      get_property("audio-fft", MPV_FORMAT_BYTE_ARRAY, &data);
+      if (data.size != (size_t)fft_size)
+        fail("audio-fft: get_property size %zu, expected %d\n", data.size,
+             fft_size);
+      mpv_free(data.data);
+    }
+  }
+
+  mpv_unobserve_property(ctx, 0);
+
+  if (peak_frames < 3)
+    fail("audio-fft: only %d spectrum frames received\n", frames);
+
+  int expected_bin = (int)lround(expected_freq * fft_size / sample_rate);
+  int average_peak = peak_sum / peak_frames;
+  printf("audio-fft spectrum: %d frames, average peak bin %d, expected %d\n",
+         frames, average_peak, expected_bin);
+  // the Hann window spreads the tone over neighbouring bins
+  if (abs(average_peak - expected_bin) > 1)
+    fail("audio-fft: peak bin %d, expected %d\n", average_peak, expected_bin);
+
+  printf("audio-fft spectrum test passed!\n");
+}
+
 static void test_audio_fft_no_observers(void) {
   reload_file("/home/mpv/sine.wav");
 
@@ -210,7 +290,9 @@ static void test_audio_fft_rate(void) {
          "actual rate: %.1f Hz, expected rate: %.1f Hz\n",
          fft_count, elapsed, actual_rate, expected_rate);
 
-  if (actual_rate < expected_rate * 0.7 || actual_rate > expected_rate * 1.5)
+  // Spectrum frames have to arrive at the rate from audio-fft-rate, without
+  // extra events for values that did not change.
+  if (actual_rate < expected_rate * 0.7 || actual_rate > expected_rate * 1.25)
     fail("audio-fft rate mismatch: expected ~%.1f Hz, got %.1f Hz\n",
          expected_rate, actual_rate);
 
@@ -237,6 +319,9 @@ int main(void) {
 
   printf(fmt, "test_audio_fft_read_property");
   test_audio_fft_read_property();
+
+  printf(fmt, "test_audio_fft_spectrum");
+  test_audio_fft_spectrum();
 
   printf(fmt, "test_audio_fft_no_observers");
   test_audio_fft_no_observers();

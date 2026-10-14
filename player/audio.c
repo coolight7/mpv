@@ -952,108 +952,163 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
     ao_reset(mpctx->ao);
 }
 
-// Swap two float values
-static void fft_swap(float *a, float *b) {
-  float t = *a;
-  *a = *b;
-  *b = t;
+// ---------------------------------------------------------------------------
+// Realtime audio spectrum for visualization ("audio-fft" property)
+//
+// Every audio frame that is handed to the audio output is mixed down to mono
+// and appended to a ring buffer. At most audio-fft-rate times per second the
+// last audio-fft-size samples are taken out of the ring buffer, multiplied
+// with a Hann window and turned into a spectrum with an FFT. The magnitudes
+// are mapped from -80 dB .. 0 dB onto 0 .. 255 and published through the
+// "audio-fft" property as audio-fft-size bytes (bin 0 is the DC part, the
+// upper half mirrors the lower half).
+//
+// The tables (window, twiddle factors, bit reversal order) and the work
+// buffers are built once per FFT size, so publishing a frame neither
+// allocates memory nor calls trigonometric functions in a loop.
+// ---------------------------------------------------------------------------
+
+// How many FFT frames the ring buffer keeps. Only the newest fft_size samples
+// are used, the rest makes sure that no samples are lost between two compute
+// steps.
+#define AUDIO_FFT_RING_FRAMES 4
+
+static void audio_fft_free_tables(struct MPContext *mpctx) {
+  talloc_free(mpctx->audio_fft_bit_reverse);
+  talloc_free(mpctx->audio_fft_twiddle);
+  talloc_free(mpctx->audio_fft_window);
+  talloc_free(mpctx->audio_fft_real);
+  talloc_free(mpctx->audio_fft_imag);
+  mpctx->audio_fft_bit_reverse = NULL;
+  mpctx->audio_fft_twiddle = NULL;
+  mpctx->audio_fft_window = NULL;
+  mpctx->audio_fft_real = NULL;
+  mpctx->audio_fft_imag = NULL;
+  mpctx->audio_fft_table_size = 0;
 }
 
-// Bit-reversal permutation for FFT
-static void fft_bit_reverse(float *real, float *imag, int n) {
-  int j = 0;
+// Build the tables for the given FFT size (a power of 2).
+static void audio_fft_init_tables(struct MPContext *mpctx, int n) {
+  audio_fft_free_tables(mpctx);
+
+  mpctx->audio_fft_bit_reverse = talloc_array(mpctx, int, n);
+  mpctx->audio_fft_twiddle = talloc_array(mpctx, float, n);
+  mpctx->audio_fft_window = talloc_array(mpctx, float, n);
+  mpctx->audio_fft_real = talloc_array(mpctx, float, n);
+  mpctx->audio_fft_imag = talloc_array(mpctx, float, n);
+
+  // Bit reversal, one table lookup per sample instead of bit operations.
+  int bits = 0;
+  while ((1 << bits) < n)
+    bits++;
   for (int i = 0; i < n; i++) {
-    if (i < j) {
-      fft_swap(&real[i], &real[j]);
-      fft_swap(&imag[i], &imag[j]);
+    int reversed = 0;
+    for (int b = 0; b < bits; b++) {
+      if (i & (1 << b))
+        reversed |= 1 << (bits - 1 - b);
     }
-    int bit = n >> 1;
-    while (bit && (j & bit)) {
-      j ^= bit;
-      bit >>= 1;
-    }
-    j ^= bit;
+    mpctx->audio_fft_bit_reverse[i] = reversed;
   }
+
+  // Twiddle factors w(k) = exp(-2*pi*i*k/n) for k < n/2. The stages of the
+  // FFT pick their factors with a fixed step, so one table is enough.
+  for (int k = 0; k < n / 2; k++) {
+    double angle = 2.0 * M_PI * k / n;
+    mpctx->audio_fft_twiddle[2 * k] = cos(angle);
+    mpctx->audio_fft_twiddle[2 * k + 1] = -sin(angle);
+  }
+
+  // Hann window.
+  for (int i = 0; i < n; i++) {
+    mpctx->audio_fft_window[i] =
+        0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)(n - 1)));
+  }
+
+  // The transform sums n samples, so a full scale sine (amplitude 1) has a
+  // magnitude of n/2, and n for the DC and the Nyquist bin.
+  mpctx->audio_fft_mag_scale_dc = 1.0f / (float)n;
+  mpctx->audio_fft_mag_scale_ac = 2.0f / (float)n;
+
+  mpctx->audio_fft_table_size = n;
 }
 
-// Radix-2 Cooley-Tukey complex FFT
-static void fft_complex(float *real, float *imag, int n, bool inverse) {
-  fft_bit_reverse(real, imag, n);
+// In-place radix-2 FFT. audio_fft_real[] holds the input samples, fft_imag[]
+// must be zero before the call; afterwards both hold the transformed values.
+static void audio_fft_run(struct MPContext *mpctx, int n) {
+  float *real = mpctx->audio_fft_real;
+  float *imag = mpctx->audio_fft_imag;
+  const int *bit_reverse = mpctx->audio_fft_bit_reverse;
+  const float *twiddle = mpctx->audio_fft_twiddle;
+
+  for (int i = 0; i < n; i++) {
+    int j = bit_reverse[i];
+    if (i < j) {
+      float t = real[i];
+      real[i] = real[j];
+      real[j] = t;
+      t = imag[i];
+      imag[i] = imag[j];
+      imag[j] = t;
+    }
+  }
 
   for (int len = 2; len <= n; len <<= 1) {
-    float angle = 2.0f * (float)M_PI / (float)len;
-    if (inverse)
-      angle = -angle;
-    float w_real = cosf(angle);
-    float w_imag = sinf(angle);
-
+    int half = len / 2;
+    int step = n / len; // step between two twiddle factors in the table
     for (int i = 0; i < n; i += len) {
-      float cur_real = 1.0f;
-      float cur_imag = 0.0f;
-      int half = len / 2;
+      const float *w = twiddle;
       for (int j = 0; j < half; j++) {
         int idx1 = i + j;
-        int idx2 = i + j + half;
-        float t_real = cur_real * real[idx2] - cur_imag * imag[idx2];
-        float t_imag = cur_real * imag[idx2] + cur_imag * real[idx2];
-        real[idx2] = real[idx1] - t_real;
-        imag[idx2] = imag[idx1] - t_imag;
-        real[idx1] = real[idx1] + t_real;
-        imag[idx1] = imag[idx1] + t_imag;
-        float next_real = cur_real * w_real - cur_imag * w_imag;
-        float next_imag = cur_real * w_imag + cur_imag * w_real;
-        cur_real = next_real;
-        cur_imag = next_imag;
+        int idx2 = idx1 + half;
+        float re = real[idx2];
+        float im = imag[idx2];
+        float t_re = w[0] * re - w[1] * im;
+        float t_im = w[0] * im + w[1] * re;
+        real[idx2] = real[idx1] - t_re;
+        imag[idx2] = imag[idx1] - t_im;
+        real[idx1] += t_re;
+        imag[idx1] += t_im;
+        w += 2 * step;
       }
     }
   }
-
-  if (inverse) {
-    for (int i = 0; i < n; i++) {
-      real[i] /= (float)n;
-      imag[i] /= (float)n;
-    }
-  }
 }
 
-// Real FFT: compute magnitude spectrum from real input samples.
-// input: n real samples (n must be a power of 2), already windowed
-// output: n bytes, each scaled to [0, 255] via dB normalization
-static void audio_fft_real(const float *input, int n, uint8_t *output) {
-  float *real = talloc_size(NULL, n * sizeof(float));
-  float *imag = talloc_size(NULL, n * sizeof(float));
-
-  for (int i = 0; i < n; i++) {
-    real[i] = input[i];
-    imag[i] = 0.0f;
-  }
-
-  fft_complex(real, imag, n, false);
-
+// Map one magnitude to a byte between 0 and 255.
+static inline uint8_t audio_fft_to_byte(float re, float im, float scale) {
   const float db_min = -80.0f;
-  const float db_max = 0.0f;
-  const float db_range = db_max - db_min;
+  const float db_range = 80.0f;
 
-  for (int i = 0; i < n; i++) {
-    float mag = sqrtf(real[i] * real[i] + imag[i] * imag[i]);
-
-    float norm = (i == 0 || i == n / 2) ? mag / (float)n : mag / (float)(n / 2);
-
-    float db = 20.0f * log10f(norm + 1e-10f);
-    float linear = (db - db_min) / db_range;
-    if (linear < 0.0f)
-      linear = 0.0f;
-    if (linear > 1.0f)
-      linear = 1.0f;
-    output[i] = (uint8_t)(linear * 255.0f);
-  }
-
-  talloc_free(real);
-  talloc_free(imag);
+  float magnitude = sqrtf(re * re + im * im) * scale;
+  float db = 20.0f * log10f(magnitude + 1e-10f);
+  float level = (db - db_min) / db_range;
+  if (level < 0.0f)
+    level = 0.0f;
+  if (level > 1.0f)
+    level = 1.0f;
+  return (uint8_t)(level * 255.0f);
 }
 
-// Capture audio samples from an audio frame for FFT visualization.
-// Downmixes multi-channel audio to mono and stores as float samples.
+// Turn the transformed samples into the byte spectrum.
+static void audio_fft_to_bytes(struct MPContext *mpctx, int n) {
+  const float *real = mpctx->audio_fft_real;
+  const float *imag = mpctx->audio_fft_imag;
+  uint8_t *output = mpctx->audio_fft_output;
+
+  output[0] =
+      audio_fft_to_byte(real[0], imag[0], mpctx->audio_fft_mag_scale_dc);
+  for (int i = 1; i < n / 2; i++)
+    output[i] =
+        audio_fft_to_byte(real[i], imag[i], mpctx->audio_fft_mag_scale_ac);
+  output[n / 2] = audio_fft_to_byte(real[n / 2], imag[n / 2],
+                                    mpctx->audio_fft_mag_scale_dc);
+
+  // Bins above the Nyquist frequency mirror the ones below.
+  for (int i = 1; i < n / 2; i++)
+    output[n - i] = output[i];
+}
+
+// Mix one audio frame down to mono and append it to the ring buffer.
 void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
   if (!mpctx->opts->audio_fft_rate || !mpctx->opts->audio_fft_size)
     return;
@@ -1062,15 +1117,16 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
     return;
 
   int fft_size = mpctx->opts->audio_fft_size;
-  int buf_size = fft_size * 4;
+  int buf_size = fft_size * AUDIO_FFT_RING_FRAMES;
 
   if (mpctx->audio_fft_buffer_size != buf_size) {
     talloc_free(mpctx->audio_fft_buffer);
     talloc_free(mpctx->audio_fft_output);
-    mpctx->audio_fft_buffer = talloc_size(mpctx, buf_size * sizeof(float));
+    mpctx->audio_fft_buffer = talloc_array(mpctx, float, buf_size);
     mpctx->audio_fft_buffer_size = buf_size;
     mpctx->audio_fft_buffer_pos = 0;
-    mpctx->audio_fft_output = talloc_size(mpctx, fft_size * sizeof(uint8_t));
+    mpctx->audio_fft_captured = 0;
+    mpctx->audio_fft_output = talloc_array(mpctx, uint8_t, fft_size);
     mpctx->audio_fft_output_size = fft_size;
     mpctx->audio_fft_output_valid = false;
     mpctx->audio_fft_last_time = 0;
@@ -1081,115 +1137,125 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
   int format = mp_aframe_get_format(aframe);
   uint8_t **planes = mp_aframe_get_data_ro(aframe);
 
-  if (!samples || !channels || !planes || !planes[0])
+  if (samples <= 0 || channels <= 0 || !planes || !planes[0])
+    return;
+  if (!af_fmt_is_valid(format) ||
+      (!af_fmt_is_float(format) && !af_fmt_is_int(format)))
     return;
 
   bool planar = af_fmt_is_planar(format);
+  bool is_float = af_fmt_is_float(format);
+  bool is_unsigned = af_fmt_is_unsigned(format);
   int bytes = af_fmt_to_bytes(format);
+  float scale = 1.0f / (float)channels;
+  float int_scale = 1.0f / (float)(1 << (bytes * 8 - 1));
+
+  float *buffer = mpctx->audio_fft_buffer;
+  int size = mpctx->audio_fft_buffer_size;
+  int pos = mpctx->audio_fft_buffer_pos;
 
   for (int s = 0; s < samples; s++) {
-    float sample = 0.0f;
+    float sum = 0.0f;
 
-    if (af_fmt_is_float(format)) {
-      if (planar) {
-        for (int c = 0; c < channels; c++) {
-          float *p = (float *)planes[c];
-          sample += p[s];
+    for (int c = 0; c < channels; c++) {
+      const uint8_t *ptr =
+          planar ? planes[c] + (size_t)s * bytes
+                 : planes[0] + (size_t)(s * channels + c) * bytes;
+      if (is_float) {
+        if (bytes == 4) {
+          float value;
+          memcpy(&value, ptr, sizeof(value));
+          sum += value;
+        } else {
+          double value;
+          memcpy(&value, ptr, sizeof(value));
+          sum += value;
         }
+      } else if (is_unsigned) {
+        // unsigned samples are centered around half of their value range
+        int value = bytes == 1 ? ptr[0] : ptr[0] | (ptr[1] << 8);
+        sum += ((float)value - (float)(1 << (bytes * 8 - 1))) * int_scale;
       } else {
-        float *p = (float *)planes[0];
-        for (int c = 0; c < channels; c++)
-          sample += p[s * channels + c];
+        // signed samples, least significant byte first
+        int32_t value = (int8_t)ptr[bytes - 1]; // sign extend
+        for (int b = bytes - 2; b >= 0; b--)
+          value = (value << 8) | ptr[b];
+        sum += (float)value * int_scale;
       }
-    } else if (af_fmt_is_int(format)) {
-      if (planar) {
-        for (int c = 0; c < channels; c++) {
-          int32_t val = 0;
-          uint8_t *ptr = planes[c] + s * bytes;
-          for (int b = 0; b < bytes; b++)
-            val |= (int32_t)ptr[b] << (b * 8);
-          int shift = 32 - bytes * 8;
-          val = (val << shift) >> shift;
-          sample += (float)val / (float)(1 << (bytes * 8 - 1));
-        }
-      } else {
-        for (int c = 0; c < channels; c++) {
-          int32_t val = 0;
-          uint8_t *ptr = planes[0] + (s * channels + c) * bytes;
-          for (int b = 0; b < bytes; b++)
-            val |= (int32_t)ptr[b] << (b * 8);
-          int shift = 32 - bytes * 8;
-          val = (val << shift) >> shift;
-          sample += (float)val / (float)(1 << (bytes * 8 - 1));
-        }
-      }
-    } else {
-      continue;
     }
 
-    sample /= (float)channels;
-
-    mpctx->audio_fft_buffer[mpctx->audio_fft_buffer_pos] = sample;
-    mpctx->audio_fft_buffer_pos++;
-    if (mpctx->audio_fft_buffer_pos >= mpctx->audio_fft_buffer_size)
-      mpctx->audio_fft_buffer_pos = 0;
+    buffer[pos] = sum * scale;
+    pos++;
+    if (pos >= size)
+      pos = 0;
   }
+
+  mpctx->audio_fft_buffer_pos = pos;
+  mpctx->audio_fft_captured += samples;
 }
 
-// Compute FFT from buffered audio samples.
-// Called periodically at the rate specified by audio-fft-rate.
+// Compute the spectrum from the collected samples. Called from the play loop,
+// the rate is limited by the audio-fft-rate option.
 void audio_fft_compute(struct MPContext *mpctx) {
   if (!mpctx->opts->audio_fft_rate || !mpctx->opts->audio_fft_size)
     return;
-  if (!mpctx->audio_fft_buffer || !mpctx->audio_fft_buffer_size)
+
+  // Nothing was captured since the last spectrum, there is no new data to
+  // publish (this also covers paused playback).
+  if (!mpctx->audio_fft_buffer || !mpctx->audio_fft_buffer_size ||
+      !mpctx->audio_fft_captured)
+    return;
+
+  double interval = 1.0 / (double)mpctx->opts->audio_fft_rate;
+  double now = mp_time_sec();
+  if (mpctx->audio_fft_last_time != 0 &&
+      now - mpctx->audio_fft_last_time < interval)
     return;
 
   if (!mp_property_has_observers(mpctx, "audio-fft"))
     return;
 
-  double now = mp_time_sec();
-  double interval = 1.0 / (double)mpctx->opts->audio_fft_rate;
+  int n = mpctx->opts->audio_fft_size;
+  if (mpctx->audio_fft_table_size != n)
+    audio_fft_init_tables(mpctx, n);
 
-  if (mpctx->audio_fft_last_time != 0 &&
-      now - mpctx->audio_fft_last_time < interval)
-    return;
+  // Take the newest n samples out of the ring buffer and apply the window.
+  float *real = mpctx->audio_fft_real;
+  float *imag = mpctx->audio_fft_imag;
+  const float *window = mpctx->audio_fft_window;
+  const float *buffer = mpctx->audio_fft_buffer;
+  int size = mpctx->audio_fft_buffer_size;
+  int start = mpctx->audio_fft_buffer_pos - n;
+  if (start < 0)
+    start += size;
 
-  mpctx->audio_fft_last_time = now;
+  int first = size - start;
+  if (first > n)
+    first = n;
+  for (int i = 0; i < first; i++)
+    real[i] = buffer[start + i] * window[i];
+  for (int i = first; i < n; i++)
+    real[i] = buffer[i - first] * window[i];
+  memset(imag, 0, n * sizeof(float));
 
-  int fft_size = mpctx->opts->audio_fft_size;
-  int buf_size = mpctx->audio_fft_buffer_size;
-  int pos = mpctx->audio_fft_buffer_pos;
+  audio_fft_run(mpctx, n);
+  audio_fft_to_bytes(mpctx, n);
 
-  float *input = talloc_size(NULL, fft_size * sizeof(float));
-  for (int i = 0; i < fft_size; i++) {
-    int idx = pos - fft_size + i;
-    while (idx < 0)
-      idx += buf_size;
-    input[i] = mpctx->audio_fft_buffer[idx % buf_size];
-  }
-
-  for (int i = 0; i < fft_size; i++) {
-    float w =
-        0.5f *
-        (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)(fft_size - 1)));
-    input[i] *= w;
-  }
-
-  audio_fft_real(input, fft_size, mpctx->audio_fft_output);
-  mpctx->audio_fft_output_size = fft_size;
   mpctx->audio_fft_output_valid = true;
-
-  talloc_free(input);
+  mpctx->audio_fft_captured = 0;
+  mpctx->audio_fft_last_time = now;
 
   mp_notify_property(mpctx, "audio-fft");
 }
 
 void audio_fft_uninit(struct MPContext *mpctx) {
+  audio_fft_free_tables(mpctx);
   talloc_free(mpctx->audio_fft_buffer);
   talloc_free(mpctx->audio_fft_output);
   mpctx->audio_fft_buffer = NULL;
   mpctx->audio_fft_buffer_size = 0;
   mpctx->audio_fft_buffer_pos = 0;
+  mpctx->audio_fft_captured = 0;
   mpctx->audio_fft_output = NULL;
   mpctx->audio_fft_output_size = 0;
   mpctx->audio_fft_output_valid = false;

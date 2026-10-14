@@ -1819,11 +1819,16 @@ static int mp_property_audio_fft(void *ctx, struct m_property *prop, int action,
       };
       return M_PROPERTY_UNAVAILABLE;
     }
+    // Hand a copy to the API user: mpv_get_property() gives byte arrays to
+    // the caller, who releases them with mpv_free(). The data is a child of
+    // the byte array struct, exactly like a node that was copied with
+    // copy_node(), so everything is released either way.
+    struct mpv_byte_array *ba = talloc_ptrtype(NULL, ba);
+    ba->size = mpctx->audio_fft_output_size;
+    ba->data = talloc_memdup(ba, mpctx->audio_fft_output, ba->size);
     struct mpv_node *node = arg;
     node->format = MPV_FORMAT_BYTE_ARRAY;
-    node->u.ba = talloc(NULL, mpv_byte_array);
-    node->u.ba->data = mpctx->audio_fft_output;
-    node->u.ba->size = mpctx->audio_fft_output_size;
+    node->u.ba = ba;
     return M_PROPERTY_OK;
   }
   }
@@ -4450,7 +4455,7 @@ static const char *const *const mp_event_property_change[] = {
       "frame-drop-count", "video-frame-info", "vf-metadata", "af-metadata",
       "sub-start", "sub-end", "secondary-sub-start", "secondary-sub-end",
       "video-out-params", "video-dec-params", "video-params",
-      "deinterlace-active", "video-target-params", "audio-fft"),
+      "deinterlace-active", "video-target-params"),
     E(MP_EVENT_DURATION_UPDATE, "duration"),
     E(MPV_EVENT_VIDEO_RECONFIG, "video-out-params", "video-params",
       "video-format", "video-codec", "video-bitrate", "dwidth", "dheight",

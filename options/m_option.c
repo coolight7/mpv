@@ -3916,6 +3916,9 @@ void *node_get_alloc(struct mpv_node *node)
     case MPV_FORMAT_NODE_ARRAY:
     case MPV_FORMAT_NODE_MAP:
         return node->u.list;
+    case MPV_FORMAT_BYTE_ARRAY:
+        // the byte array struct owns its data
+        return node->u.ba;
     default:
         return NULL;
     }

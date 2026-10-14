@@ -472,14 +472,25 @@ typedef struct MPContext {
 
   struct mp_als *als_state; // lazily initialized on first use
 
-  // audio FFT visualization
-  float *audio_fft_buffer;     // accumulated audio samples (mono float)
-  int audio_fft_buffer_pos;    // current write position
-  int audio_fft_buffer_size;   // allocated size of buffer
-  uint8_t *audio_fft_output;   // FFT output byte array
-  int audio_fft_output_size;   // size of output array
-  double audio_fft_last_time;  // last time FFT was computed
-  bool audio_fft_output_valid; // whether output has valid data
+  // audio FFT visualization (see the audio_fft_* functions in audio.c)
+  float *audio_fft_buffer;       // ring buffer with the last mono samples
+  int audio_fft_buffer_size;     // ring buffer capacity in samples
+  int audio_fft_buffer_pos;      // next write position in the ring buffer
+  int64_t audio_fft_captured;    // samples captured since the last compute
+  uint8_t *audio_fft_output;     // spectrum (audio_fft_output_size bytes)
+  int audio_fft_output_size;     // size of the spectrum in bytes
+  bool audio_fft_output_valid;   // whether the spectrum has valid data
+  double audio_fft_last_time;    // time the spectrum was computed last
+  // tables and work buffers for audio_fft_table_size, they are built only
+  // when the audio-fft-size option changes
+  int audio_fft_table_size;      // FFT size the tables below belong to
+  int *audio_fft_bit_reverse;    // bit reversal order, fft_size entries
+  float *audio_fft_twiddle;      // twiddle factors (cos, -sin)
+  float *audio_fft_window;       // window coefficients, fft_size entries
+  float *audio_fft_real;         // FFT work buffer, fft_size entries
+  float *audio_fft_imag;         // FFT work buffer, fft_size entries
+  float audio_fft_mag_scale_dc;  // 1/n, for the DC and the Nyquist bin
+  float audio_fft_mag_scale_ac;  // 2/n, for every other bin
 } MPContext;
 
 // Contains information about an asynchronous work item, how it can be aborted,
