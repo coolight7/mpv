@@ -962,15 +962,21 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // ---------------------------------------------------------------------------
 // Realtime audio spectrum for visualization ("audio-fft" property)
 //
-// The property publishes audio-fft-size bytes: -80 dB .. 0 dB mapped to
-// 0 .. 255, the same format as the batch extraction the app uses for whole
-// files (mediaxx). The published bytes are display bands, not single FFT bins:
-// band i covers the frequency range from AUDIO_FFT_BAND_EDGES[i] to
-// AUDIO_FFT_BAND_EDGES[i + 1] Hz (see the table below), so with the defaults
-// (rate 10, size 256) one frame covers 1/10 second and the bands tile
-// 0 .. 20 kHz. The level of a band is the combined level of the FFT bins inside
-// it, which keeps the value a pure tone produces the same as when the bin was
-// published on its own.
+// The property publishes audio-fft-size bytes for the visualization to draw.
+// A band is not a single FFT bin: band i covers the frequency range from
+// AUDIO_FFT_BAND_EDGES[i] to AUDIO_FFT_BAND_EDGES[i + 1] Hz (see the table
+// below), so with the defaults (rate 10, size 256) one frame covers 1/10 second
+// and the bands tile 0 .. 20 kHz. The level of a band is the combined level of
+// the FFT bins inside it, which keeps the value a pure tone produces the same
+// as when the bin was published on its own.
+//
+// A band is first measured as a level (-80 dB .. 0 dB over 0 .. 255, the same
+// scale the batch extraction of a whole file (mediaxx) publishes), and then
+// put on the scale of the frame it belongs to (the loudest band of that frame
+// is drawn near the top) because that is what the picture needs: the levels as
+// they are make dense parts of a song a flat wall and quiet parts a low line
+// (see audio_fft_display_adjust() below). The batch extraction keeps
+// publishing plain levels, because the numbers there have to mean something.
 //
 // Each frame is transformed on its own: the newest window of samples that
 // still fits into one frame (a power of two, 4096 samples at 44.1 kHz, which
@@ -1002,42 +1008,49 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // The published bands, as their edges in Hz: band i covers
 // [AUDIO_FFT_BAND_EDGES[i], AUDIO_FFT_BAND_EDGES[i + 1]).
 //
-// The layout is what an equalizer looks like, with the low end limited by what
-// the analysis window can still separate: a fixed 40 Hz step up to 3.84 kHz
-// (about three FFT bins at 44.1 kHz and at 48 kHz, so the level of a band does
-// not jump when the number of bins inside it changes), then a fixed step of
-// 1.04 percent per band up to 20 kHz, which is a fixed number of bands per
-// octave at the top (about 67) instead of a fixed number of Hz.
+// The layout follows what the picture needs and what the analysis window can
+// still separate:
+//   * 0 .. 3.84 kHz in fixed 30 Hz steps (128 bands, about three FFT bins per
+//     band at 44.1 kHz and at 48 kHz), where music has most of its detail;
+//   * 3.84 .. 12 kHz by a fixed ratio per band (77 bands, about 47 per octave);
+//   * 12 .. 20 kHz by a fixed ratio per band (51 bands, about 69 per octave).
+// A fixed number of Hz per band would either waste bands on the top (nothing
+// up there moves) or make the low bands too narrow to separate (a band thinner
+// than about three FFT bins only follows its neighbour). Bands per third:
+// 12 percent of the bands cover 0 .. 1 kHz, 44 percent cover 1 .. 5 kHz,
+// 42 percent cover 5 .. 20 kHz.
 //
 // Keep this table and the one in mediaxx (src/lib/analyse/audio_visualization.h)
-// identical: the batch extraction and this property have to agree.
+// identical: the batch extraction and this property have to agree. The batch
+// extraction publishes plain levels, this property publishes what the picture
+// draws (see audio_fft_display_adjust() below).
 static const int AUDIO_FFT_BAND_EDGES[] = {
-    0, 40, 80, 120, 160, 200, 240, 280, 320, 360,
-    400, 440, 480, 520, 560, 600, 640, 680, 720, 760,
-    800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160,
-    1200, 1240, 1280, 1320, 1360, 1400, 1440, 1480, 1520, 1560,
-    1600, 1640, 1680, 1720, 1760, 1800, 1840, 1880, 1920, 1960,
-    2000, 2040, 2080, 2120, 2160, 2200, 2240, 2280, 2320, 2360,
-    2400, 2440, 2480, 2520, 2560, 2600, 2640, 2680, 2720, 2760,
-    2800, 2840, 2880, 2920, 2960, 3000, 3040, 3080, 3120, 3160,
-    3200, 3240, 3280, 3320, 3360, 3400, 3440, 3480, 3520, 3560,
-    3600, 3640, 3680, 3720, 3760, 3800, 3840, 3880, 3920, 3960,
-    4000, 4040, 4090, 4130, 4170, 4210, 4260, 4300, 4350, 4390,
-    4440, 4480, 4530, 4580, 4620, 4670, 4720, 4770, 4820, 4870,
-    4920, 4970, 5020, 5070, 5130, 5180, 5230, 5290, 5340, 5400,
-    5450, 5510, 5570, 5620, 5680, 5740, 5800, 5860, 5920, 5980,
-    6050, 6110, 6170, 6240, 6300, 6370, 6430, 6500, 6570, 6630,
-    6700, 6770, 6840, 6910, 6980, 7060, 7130, 7200, 7280, 7350,
-    7430, 7510, 7590, 7660, 7740, 7820, 7900, 7990, 8070, 8150,
-    8240, 8320, 8410, 8500, 8580, 8670, 8760, 8850, 8950, 9040,
-    9130, 9230, 9320, 9420, 9520, 9620, 9720, 9820, 9920, 10000,
-    10100, 10200, 10300, 10400, 10600, 10700, 10800, 10900, 11000, 11100,
-    11200, 11300, 11500, 11600, 11700, 11800, 11900, 12100, 12200, 12300,
-    12400, 12600, 12700, 12800, 13000, 13100, 13200, 13400, 13500, 13700,
-    13800, 13900, 14100, 14200, 14400, 14500, 14700, 14800, 15000, 15100,
-    15300, 15500, 15600, 15800, 15900, 16100, 16300, 16400, 16600, 16800,
-    17000, 17100, 17300, 17500, 17700, 17900, 18000, 18200, 18400, 18600,
-    18800, 19000, 19200, 19400, 19600, 19800, 20000
+0, 30, 60, 90, 120, 150, 180, 210, 240, 270,
+    300, 330, 360, 390, 420, 450, 480, 510, 540, 570,
+    600, 630, 660, 690, 720, 750, 780, 810, 840, 870,
+    900, 930, 960, 990, 1020, 1050, 1080, 1110, 1140, 1170,
+    1200, 1230, 1260, 1290, 1320, 1350, 1380, 1410, 1440, 1470,
+    1500, 1530, 1560, 1590, 1620, 1650, 1680, 1710, 1740, 1770,
+    1800, 1830, 1860, 1890, 1920, 1950, 1980, 2010, 2040, 2070,
+    2100, 2130, 2160, 2190, 2220, 2250, 2280, 2310, 2340, 2370,
+    2400, 2430, 2460, 2490, 2520, 2550, 2580, 2610, 2640, 2670,
+    2700, 2730, 2760, 2790, 2820, 2850, 2880, 2910, 2940, 2970,
+    3000, 3030, 3060, 3090, 3120, 3150, 3180, 3210, 3240, 3270,
+    3300, 3330, 3360, 3390, 3420, 3450, 3480, 3510, 3540, 3570,
+    3600, 3630, 3660, 3690, 3720, 3750, 3780, 3810, 3840, 3897,
+    3955, 4014, 4074, 4135, 4197, 4259, 4323, 4387, 4452, 4519,
+    4586, 4655, 4724, 4794, 4866, 4938, 5012, 5087, 5163, 5240,
+    5318, 5397, 5477, 5559, 5642, 5726, 5811, 5898, 5986, 6075,
+    6166, 6258, 6351, 6446, 6542, 6639, 6738, 6839, 6941, 7044,
+    7149, 7256, 7364, 7474, 7585, 7698, 7813, 7929, 8048, 8167,
+    8289, 8413, 8538, 8666, 8795, 8926, 9059, 9194, 9331, 9470,
+    9611, 9755, 9900, 10048, 10197, 10349, 10504, 10660, 10819, 10980,
+    11144, 11310, 11479, 11650, 11824, 12000, 12121, 12243, 12366, 12491,
+    12616, 12743, 12872, 13001, 13132, 13264, 13398, 13533, 13669, 13806,
+    13945, 14086, 14228, 14371, 14515, 14662, 14809, 14958, 15109, 15261,
+    15415, 15570, 15726, 15885, 16045, 16206, 16369, 16534, 16701, 16869,
+    17038, 17210, 17383, 17558, 17735, 17913, 18094, 18276, 18460, 18646,
+    18833, 19023, 19215, 19408, 19603, 19801, 20000
 };
 
 #define AUDIO_FFT_BANDS (MP_ARRAY_SIZE(AUDIO_FFT_BAND_EDGES) - 1)
@@ -1284,6 +1297,79 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
   return (uint8_t)(level * 255.0f);
 }
 
+// Display adjustment of a published frame: what the visualization draws.
+//
+// The levels alone are hard to read: music uses only the upper part of the
+// -80 dB range (about -70 .. -15 dB), so a quiet passage is a low line that
+// fills a third of the height, and a dense part of a song (drums, vocals and
+// instruments at the same time: every band carries energy, neighbouring bands
+// differ by 30 .. 40 dB) is a wall that never reaches the floor. Neither looks
+// like "several waves at different heights".
+//
+// A frame is therefore put on its own scale: the loudest band of that frame is
+// drawn at AUDIO_FFT_DISPLAY_TOP, a band AUDIO_FFT_DISPLAY_WINDOW_DB below it
+// is drawn at zero, and everything in between keeps its relative height. The
+// order of the bands does not change, only how much of the drawing height is
+// used. Measured on a real song this grows the differences between
+// neighbouring bands by about 45 percent and the frame to frame movement by
+// about 60 percent, and it flattens the difference between passages, which is
+// what fills the picture while the music plays.
+//
+// Frames whose loudest band stays below AUDIO_FFT_DISPLAY_GATE_LOW are left as
+// they are (silence and very quiet parts keep looking quiet instead of being
+// pumped up to the top), and between the two gate values the plain and the
+// adjusted frame are mixed, so crossing the gate does not jump.
+//
+// AUDIO_FFT_DISPLAY_GAMMA stretches the differences once more (a gamma curve on
+// the height). The app and the plugins draw these bytes as they come; keep
+// these constants in step with AudioWaveBaseConfig_c in the app
+// (defDisplayWindowDb / defDisplayTopLevel / defDisplayGateLow /
+// defDisplayGateHigh / defDisplayGamma, used when a frame comes from the batch
+// extraction instead of from this property).
+#define AUDIO_FFT_DISPLAY_WINDOW_DB 50.0
+#define AUDIO_FFT_DISPLAY_TOP 230.0
+#define AUDIO_FFT_DISPLAY_GATE_LOW 64.0
+#define AUDIO_FFT_DISPLAY_GATE_HIGH 96.0
+#define AUDIO_FFT_DISPLAY_GAMMA 1.2
+
+static void audio_fft_display_adjust(uint8_t *bytes, int count) {
+  if (count < 1)
+    return;
+
+  int peak = 0;
+  for (int i = 0; i < count; i++) {
+    if (bytes[i] > peak)
+      peak = bytes[i];
+  }
+
+  bool adjust = peak > (int)AUDIO_FFT_DISPLAY_GATE_LOW;
+  double low = 0.0, span = 1.0, weight = 0.0;
+  if (adjust) {
+    low = (double)peak - AUDIO_FFT_DISPLAY_WINDOW_DB / 80.0 * 255.0;
+    span = peak - low < 1.0 ? 1.0 : (double)peak - low;
+    weight = peak >= AUDIO_FFT_DISPLAY_GATE_HIGH
+                 ? 1.0
+                 : ((double)peak - AUDIO_FFT_DISPLAY_GATE_LOW) /
+                       (AUDIO_FFT_DISPLAY_GATE_HIGH - AUDIO_FFT_DISPLAY_GATE_LOW);
+  }
+
+  for (int i = 0; i < count; i++) {
+    double value = (double)bytes[i];
+    if (adjust) {
+      double scaled = (value - low) / span * AUDIO_FFT_DISPLAY_TOP;
+      value += (scaled - value) * weight;
+      if (value < 0.0)
+        value = 0.0;
+      if (value > 255.0)
+        value = 255.0;
+    }
+    double shown = powf((float)(value / 255.0), (float)AUDIO_FFT_DISPLAY_GAMMA) *
+                   255.0;
+    int out = (int)(shown + 0.5);
+    bytes[i] = out < 0 ? 0 : (out > 255 ? 255 : (uint8_t)out);
+  }
+}
+
 // How many bands are published: the option picks a prefix of the table.
 static int audio_fft_band_count(struct MPContext *mpctx) {
   int count = mpctx->opts->audio_fft_size;
@@ -1308,6 +1394,9 @@ static void audio_fft_to_bytes(struct MPContext *mpctx, int bin_count) {
                                        (double)AUDIO_FFT_BAND_EDGES[i + 1],
                                        sample_rate);
   }
+
+  // The levels above are turned into what the picture draws.
+  audio_fft_display_adjust(output, bin_count);
 }
 
 // Mix one audio frame down to mono and append it to the ring buffer.

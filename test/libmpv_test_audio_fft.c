@@ -234,6 +234,12 @@ static void write_noise_wav(const char *path, double seconds) {
 // Noise with a short 1 kHz burst at a known time. The noise makes every frame
 // different, so every frame is published and the burst can be found by the
 // time it shows up at.
+//
+// The noise is kept low (0.01) on purpose: a frame whose loudest band stays
+// below the display gate keeps its plain levels, so the background of this
+// file does not lift the 1 kHz band into the range the test looks for. A
+// louder background would be put on the frame's own scale and could reach the
+// burst level by itself.
 static void write_mark_wav(const char *path, double seconds, double mark_time) {
   int samples = (int)(44100 * seconds);
   int mark_samples = (int)(44100 * 0.05);
@@ -241,7 +247,7 @@ static void write_mark_wav(const char *path, double seconds, double mark_time) {
   FILE *f = open_wav(path, samples);
   uint32_t state = 1;
   for (int i = 0; i < samples; i++) {
-    double value = 0.02;
+    double value = 0.01;
     state = state * 1103515245u + 12345u;
     value *= ((int)((state >> 16) & 0x7fff) - 16384) / 32768.0;
     if (i >= mark_start && i < mark_start + mark_samples)
@@ -342,39 +348,44 @@ static void run_spectrum(const char *path, int bin_count, int high_from,
 }
 
 // The published bytes are display bands: the band of a frequency is fixed by
-// the table in player/audio.c (40 Hz steps up to 3.84 kHz, then 1.04 percent
-// steps up to 20 kHz), so a tone has to show up in the band its frequency
-// falls into and nowhere else. Two tones are checked: a low one, and one that
-// the earlier version (which averaged the frame down and only covered 2.5 kHz)
-// folded back into the low bands.
+// the table in player/audio.c (30 Hz steps up to 3.84 kHz, then a fixed ratio
+// per band up to 12 kHz and to 20 kHz), so a tone has to show up in the band
+// its frequency falls into and nowhere else. Two tones are checked: a low one,
+// and one that the earlier version (which averaged the frame down and only
+// covered 2.5 kHz) folded back into the low bands.
+//
+// The bands are read after the display adjustment (see
+// audio_fft_display_adjust()), which keeps the order of the bands and turns
+// the loudest band of a frame into a value near the top; a range far below the
+// loudest band stays at zero, so "no content in this range" is still visible.
 static void test_audio_fft_spectrum(void) {
   const int bin_count = 256;
   const uint8_t floor_value = 8;
 
-  // 437 Hz sits in the band [400, 440), everything above 840 Hz (band 21) has
-  // to stay in the noise floor.
+  // 437 Hz sits in the band [420, 450), everything from 840 Hz (band 28) up
+  // has to stay at zero.
   struct spectrum_result low;
-  run_spectrum(tone_440_path, bin_count, 21, 0, &low);
-  printf("audio-fft %.0f Hz: %d frames, average peak band %d, expected 10, "
+  run_spectrum(tone_440_path, bin_count, 28, 0, &low);
+  printf("audio-fft %.0f Hz: %d frames, average peak band %d, expected 14, "
          "max above 840 Hz %d\n",
          tone_440_hz, low.frames, low.average_peak, low.max_high);
-  if (abs(low.average_peak - 10) > 1)
-    fail("audio-fft: %.0f Hz peak band %d, expected 10 (400..440 Hz)\n",
+  if (abs(low.average_peak - 14) > 1)
+    fail("audio-fft: %.0f Hz peak band %d, expected 14 (420..450 Hz)\n",
          tone_440_hz, low.average_peak);
   if (low.max_high > floor_value)
     fail("audio-fft: %.0f Hz has %d above 840 Hz, expected an empty range\n",
          tone_440_hz, low.max_high);
 
-  // 5003 Hz sits in the band [4970, 5020). An implementation that folds (or
+  // 5003 Hz sits in the band [4938, 5012). An implementation that folds (or
   // one that mirrors) puts it in the low bands instead.
   struct spectrum_result high;
-  run_spectrum(tone_5000_path, bin_count, 150, 100, &high);
-  printf("audio-fft %.0f Hz: %d frames, average peak band %d, expected 121, "
+  run_spectrum(tone_5000_path, bin_count, 162, 130, &high);
+  printf("audio-fft %.0f Hz: %d frames, average peak band %d, expected 145, "
          "max below 4 kHz %d, max above 6.4 kHz %d\n",
          tone_5000_hz, high.frames, high.average_peak, high.max_low,
          high.max_high);
-  if (abs(high.average_peak - 121) > 1)
-    fail("audio-fft: %.0f Hz peak band %d, expected 121 (4970..5020 Hz)\n",
+  if (abs(high.average_peak - 145) > 1)
+    fail("audio-fft: %.0f Hz peak band %d, expected 145 (4938..5012 Hz)\n",
          tone_5000_hz, high.average_peak);
   if (high.max_low > floor_value)
     fail("audio-fft: %.0f Hz tone has %d below 4 kHz, expected the range to be "
@@ -387,10 +398,13 @@ static void test_audio_fft_spectrum(void) {
   printf("audio-fft spectrum test passed!\n");
 }
 
-// The levels describe the audio, not the volume. The samples are collected
-// before the audio output applies its gain (volume, volume-gain, mute), so a
-// quiet or muted player keeps showing the running spectrum and the numbers
-// stay the same as at full volume.
+// The picture describes the audio, not the volume. The samples are collected
+// before the audio output applies its gain (volume, volume-gain, mute), and
+// the frame is put on its own scale afterwards, so a quiet or muted player
+// keeps showing the running spectrum and the published bytes stay the same as
+// at full volume. Muting is the part that catches a capture point which moved
+// behind the gain: the samples would drop to zero and the frame would be
+// empty.
 static void test_audio_fft_volume(void) {
   const int bin_count = 256;
   struct spectrum_result full, quiet, muted;
@@ -441,8 +455,10 @@ static void test_audio_fft_no_observers(void) {
 static void test_audio_fft_position(void) {
   const int bin_count = 256;
   const double mark_time = 1.0;
-  const int mark_band = 25;   // 1000 .. 1040 Hz
-  const int mark_value = 120; // a burst of 0.9 is far above this
+  const int mark_band = 33;   // 990 .. 1020 Hz
+  const int mark_value = 120; // the burst is well above this, the background
+                              // (low noise) stays below it even after the frame
+                              // is put on its own scale
 
   mpv_observe_property(ctx, 0, "audio-fft", MPV_FORMAT_BYTE_ARRAY);
   reload_file(mark_path);
