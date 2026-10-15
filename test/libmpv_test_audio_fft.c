@@ -358,6 +358,8 @@ static void run_spectrum(const char *path, int bin_count, int high_from,
 // audio_fft_display_adjust()), which keeps the order of the bands and turns
 // the loudest band of a frame into a value near the top; a range far below the
 // loudest band stays at zero, so "no content in this range" is still visible.
+// The contrast step in between moves the bands away from the middle of the
+// height and leaves both ends in place, so it keeps those two properties.
 static void test_audio_fft_spectrum(void) {
   const int bin_count = 256;
   const uint8_t floor_value = 8;
