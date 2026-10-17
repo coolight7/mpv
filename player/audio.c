@@ -1020,38 +1020,36 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // 12 percent of the bands cover 0 .. 1 kHz, 44 percent cover 1 .. 5 kHz,
 // 42 percent cover 5 .. 20 kHz.
 //
-// Keep this table and the one in mediaxx (src/lib/analyse/audio_visualization.h)
-// identical: the batch extraction and this property have to agree. The batch
-// extraction publishes plain levels, this property publishes what the picture
-// draws (see audio_fft_display_adjust() below).
+// Keep this table and the one in mediaxx
+// (src/lib/analyse/audio_visualization.h) identical: the batch extraction and
+// this property have to agree. The batch extraction publishes plain levels,
+// this property publishes what the picture draws (see
+// audio_fft_display_adjust() below).
 static const int AUDIO_FFT_BAND_EDGES[] = {
-0, 30, 60, 90, 120, 150, 180, 210, 240, 270,
-    300, 330, 360, 390, 420, 450, 480, 510, 540, 570,
-    600, 630, 660, 690, 720, 750, 780, 810, 840, 870,
-    900, 930, 960, 990, 1020, 1050, 1080, 1110, 1140, 1170,
-    1200, 1230, 1260, 1290, 1320, 1350, 1380, 1410, 1440, 1470,
-    1500, 1530, 1560, 1590, 1620, 1650, 1680, 1710, 1740, 1770,
-    1800, 1830, 1860, 1890, 1920, 1950, 1980, 2010, 2040, 2070,
-    2100, 2130, 2160, 2190, 2220, 2250, 2280, 2310, 2340, 2370,
-    2400, 2430, 2460, 2490, 2520, 2550, 2580, 2610, 2640, 2670,
-    2700, 2730, 2760, 2790, 2820, 2850, 2880, 2910, 2940, 2970,
-    3000, 3030, 3060, 3090, 3120, 3150, 3180, 3210, 3240, 3270,
-    3300, 3330, 3360, 3390, 3420, 3450, 3480, 3510, 3540, 3570,
-    3600, 3630, 3660, 3690, 3720, 3750, 3780, 3810, 3840, 3897,
-    3955, 4014, 4074, 4135, 4197, 4259, 4323, 4387, 4452, 4519,
-    4586, 4655, 4724, 4794, 4866, 4938, 5012, 5087, 5163, 5240,
-    5318, 5397, 5477, 5559, 5642, 5726, 5811, 5898, 5986, 6075,
-    6166, 6258, 6351, 6446, 6542, 6639, 6738, 6839, 6941, 7044,
-    7149, 7256, 7364, 7474, 7585, 7698, 7813, 7929, 8048, 8167,
-    8289, 8413, 8538, 8666, 8795, 8926, 9059, 9194, 9331, 9470,
-    9611, 9755, 9900, 10048, 10197, 10349, 10504, 10660, 10819, 10980,
-    11144, 11310, 11479, 11650, 11824, 12000, 12121, 12243, 12366, 12491,
-    12616, 12743, 12872, 13001, 13132, 13264, 13398, 13533, 13669, 13806,
-    13945, 14086, 14228, 14371, 14515, 14662, 14809, 14958, 15109, 15261,
-    15415, 15570, 15726, 15885, 16045, 16206, 16369, 16534, 16701, 16869,
-    17038, 17210, 17383, 17558, 17735, 17913, 18094, 18276, 18460, 18646,
-    18833, 19023, 19215, 19408, 19603, 19801, 20000
-};
+    0,     30,    60,    90,    120,   150,   180,   210,   240,   270,   300,
+    330,   360,   390,   420,   450,   480,   510,   540,   570,   600,   630,
+    660,   690,   720,   750,   780,   810,   840,   870,   900,   930,   960,
+    990,   1020,  1050,  1080,  1110,  1140,  1170,  1200,  1230,  1260,  1290,
+    1320,  1350,  1380,  1410,  1440,  1470,  1500,  1530,  1560,  1590,  1620,
+    1650,  1680,  1710,  1740,  1770,  1800,  1830,  1860,  1890,  1920,  1950,
+    1980,  2010,  2040,  2070,  2100,  2130,  2160,  2190,  2220,  2250,  2280,
+    2310,  2340,  2370,  2400,  2430,  2460,  2490,  2520,  2550,  2580,  2610,
+    2640,  2670,  2700,  2730,  2760,  2790,  2820,  2850,  2880,  2910,  2940,
+    2970,  3000,  3030,  3060,  3090,  3120,  3150,  3180,  3210,  3240,  3270,
+    3300,  3330,  3360,  3390,  3420,  3450,  3480,  3510,  3540,  3570,  3600,
+    3630,  3660,  3690,  3720,  3750,  3780,  3810,  3840,  3897,  3955,  4014,
+    4074,  4135,  4197,  4259,  4323,  4387,  4452,  4519,  4586,  4655,  4724,
+    4794,  4866,  4938,  5012,  5087,  5163,  5240,  5318,  5397,  5477,  5559,
+    5642,  5726,  5811,  5898,  5986,  6075,  6166,  6258,  6351,  6446,  6542,
+    6639,  6738,  6839,  6941,  7044,  7149,  7256,  7364,  7474,  7585,  7698,
+    7813,  7929,  8048,  8167,  8289,  8413,  8538,  8666,  8795,  8926,  9059,
+    9194,  9331,  9470,  9611,  9755,  9900,  10048, 10197, 10349, 10504, 10660,
+    10819, 10980, 11144, 11310, 11479, 11650, 11824, 12000, 12121, 12243, 12366,
+    12491, 12616, 12743, 12872, 13001, 13132, 13264, 13398, 13533, 13669, 13806,
+    13945, 14086, 14228, 14371, 14515, 14662, 14809, 14958, 15109, 15261, 15415,
+    15570, 15726, 15885, 16045, 16206, 16369, 16534, 16701, 16869, 17038, 17210,
+    17383, 17558, 17735, 17913, 18094, 18276, 18460, 18646, 18833, 19023, 19215,
+    19408, 19603, 19801, 20000};
 
 #define AUDIO_FFT_BANDS (MP_ARRAY_SIZE(AUDIO_FFT_BAND_EDGES) - 1)
 
@@ -1118,7 +1116,8 @@ static void audio_fft_update_capture(struct MPContext *mpctx, int sample_rate,
   // window can be taken from the samples that are heard now.
   mpctx->audio_fft_buffer_size =
       span * 2 + (int)(AUDIO_FFT_DELAY_MAX * sample_rate) + 1;
-  mpctx->audio_fft_buffer = talloc_array(mpctx, float, mpctx->audio_fft_buffer_size);
+  mpctx->audio_fft_buffer =
+      talloc_array(mpctx, float, mpctx->audio_fft_buffer_size);
   mpctx->audio_fft_frame = talloc_array(mpctx, float, fft_size);
   mpctx->audio_fft_output = talloc_array(mpctx, uint8_t, bin_count);
   mpctx->audio_fft_output_size = bin_count;
@@ -1263,8 +1262,10 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
   const float *imag = mpctx->audio_fft_imag;
   const float db_min = -80.0f;
   const float db_range = 80.0f;
-  float scale_dc2 = mpctx->audio_fft_mag_scale_dc * mpctx->audio_fft_mag_scale_dc;
-  float scale_ac2 = mpctx->audio_fft_mag_scale_ac * mpctx->audio_fft_mag_scale_ac;
+  float scale_dc2 =
+      mpctx->audio_fft_mag_scale_dc * mpctx->audio_fft_mag_scale_dc;
+  float scale_ac2 =
+      mpctx->audio_fft_mag_scale_ac * mpctx->audio_fft_mag_scale_ac;
   int usable = mpctx->audio_fft_bin_count; // bins the transform provides
   double bin_hz = (double)sample_rate / (double)mpctx->audio_fft_fft_size;
   int first = (int)floor(f0 / bin_hz) - 1;
@@ -1279,7 +1280,8 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
   for (int i = first; i < last; i++) {
     // Bin i covers [i - 0.5, i + 0.5] bin widths; its share is the part of
     // that range which overlaps the band.
-    double share = MPMIN((i + 0.5) * bin_hz, f1) - MPMAX((i - 0.5) * bin_hz, f0);
+    double share =
+        MPMIN((i + 0.5) * bin_hz, f1) - MPMAX((i - 0.5) * bin_hz, f0);
     if (share <= 0.0)
       continue;
     float scale2 = i ? scale_ac2 : scale_dc2;
@@ -1339,11 +1341,11 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
 // defDisplayTopLevel / defDisplayGateLow / defDisplayGateHigh /
 // defDisplayContrast / defDisplayGamma, used when a frame comes from the batch
 // extraction instead of from this property).
-#define AUDIO_FFT_DISPLAY_WINDOW_DB 50.0
+#define AUDIO_FFT_DISPLAY_WINDOW_DB 60.0
 #define AUDIO_FFT_DISPLAY_TOP 230.0
 #define AUDIO_FFT_DISPLAY_GATE_LOW 64.0
 #define AUDIO_FFT_DISPLAY_GATE_HIGH 96.0
-#define AUDIO_FFT_DISPLAY_CONTRAST 2.5
+#define AUDIO_FFT_DISPLAY_CONTRAST 1.5
 #define AUDIO_FFT_DISPLAY_GAMMA 1.2
 
 static void audio_fft_display_adjust(uint8_t *bytes, int count) {
@@ -1361,10 +1363,11 @@ static void audio_fft_display_adjust(uint8_t *bytes, int count) {
   if (adjust) {
     low = (double)peak - AUDIO_FFT_DISPLAY_WINDOW_DB / 80.0 * 255.0;
     span = peak - low < 1.0 ? 1.0 : (double)peak - low;
-    weight = peak >= AUDIO_FFT_DISPLAY_GATE_HIGH
-                 ? 1.0
-                 : ((double)peak - AUDIO_FFT_DISPLAY_GATE_LOW) /
-                       (AUDIO_FFT_DISPLAY_GATE_HIGH - AUDIO_FFT_DISPLAY_GATE_LOW);
+    weight =
+        peak >= AUDIO_FFT_DISPLAY_GATE_HIGH
+            ? 1.0
+            : ((double)peak - AUDIO_FFT_DISPLAY_GATE_LOW) /
+                  (AUDIO_FFT_DISPLAY_GATE_HIGH - AUDIO_FFT_DISPLAY_GATE_LOW);
   }
 
   for (int i = 0; i < count; i++) {
@@ -1388,8 +1391,8 @@ static void audio_fft_display_adjust(uint8_t *bytes, int count) {
       if (value > 255.0)
         value = 255.0;
     }
-    double shown = powf((float)(value / 255.0), (float)AUDIO_FFT_DISPLAY_GAMMA) *
-                   255.0;
+    double shown =
+        powf((float)(value / 255.0), (float)AUDIO_FFT_DISPLAY_GAMMA) * 255.0;
     int out = (int)(shown + 0.5);
     bytes[i] = out < 0 ? 0 : (out > 255 ? 255 : (uint8_t)out);
   }
@@ -1438,7 +1441,8 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
   int format = mp_aframe_get_format(aframe);
   uint8_t **planes = mp_aframe_get_data_ro(aframe);
 
-  if (samples <= 0 || channels <= 0 || sample_rate <= 0 || !planes || !planes[0])
+  if (samples <= 0 || channels <= 0 || sample_rate <= 0 || !planes ||
+      !planes[0])
     return;
   if (!af_fmt_is_valid(format) ||
       (!af_fmt_is_float(format) && !af_fmt_is_int(format)))
@@ -1463,9 +1467,9 @@ void audio_fft_capture(struct MPContext *mpctx, struct mp_aframe *aframe) {
     float sum = 0.0f;
 
     for (int c = 0; c < channels; c++) {
-      const uint8_t *ptr =
-          planar ? planes[c] + (size_t)s * bytes
-                 : planes[0] + (size_t)(s * channels + c) * bytes;
+      const uint8_t *ptr = planar
+                               ? planes[c] + (size_t)s * bytes
+                               : planes[0] + (size_t)(s * channels + c) * bytes;
       if (is_float) {
         if (bytes == 4) {
           float value;
