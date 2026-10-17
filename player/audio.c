@@ -1345,7 +1345,7 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
 #define AUDIO_FFT_DISPLAY_TOP 230.0
 #define AUDIO_FFT_DISPLAY_GATE_LOW 64.0
 #define AUDIO_FFT_DISPLAY_GATE_HIGH 96.0
-#define AUDIO_FFT_DISPLAY_CONTRAST 1.5
+#define AUDIO_FFT_DISPLAY_CONTRAST 1.0
 #define AUDIO_FFT_DISPLAY_GAMMA 1.2
 
 static void audio_fft_display_adjust(uint8_t *bytes, int count) {
