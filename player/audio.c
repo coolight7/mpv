@@ -1341,7 +1341,7 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
 // defDisplayTopLevel / defDisplayGateLow / defDisplayGateHigh /
 // defDisplayContrast / defDisplayGamma, used when a frame comes from the batch
 // extraction instead of from this property).
-#define AUDIO_FFT_DISPLAY_WINDOW_DB 60.0
+#define AUDIO_FFT_DISPLAY_WINDOW_DB 50.0
 #define AUDIO_FFT_DISPLAY_TOP 230.0
 #define AUDIO_FFT_DISPLAY_GATE_LOW 64.0
 #define AUDIO_FFT_DISPLAY_GATE_HIGH 96.0
