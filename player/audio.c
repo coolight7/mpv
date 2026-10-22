@@ -970,13 +970,20 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // the FFT bins inside it, which keeps the value a pure tone produces the same
 // as when the bin was published on its own.
 //
-// A band is first measured as a level (-80 dB .. 0 dB over 0 .. 255, the same
-// scale the batch extraction of a whole file (mediaxx) publishes), and then
-// put on the scale of the frame it belongs to (the loudest band of that frame
-// is drawn near the top) because that is what the picture needs: the levels as
-// they are make dense parts of a song a flat wall and quiet parts a low line
-// (see audio_fft_display_adjust() below). The batch extraction keeps
-// publishing plain levels, because the numbers there have to mean something.
+// A band is first measured as a level (-80 dB .. 0 dB over 0 .. 255), and then
+// put on the scale of the frame it belongs to: the differences between the
+// bands of one frame are stretched, so that dense parts of a song do not
+// become a flat wall. How high the frame is drawn follows the level of the
+// frame itself: a quiet passage stays low instead of being stretched to the
+// top of the picture (see audio_fft_display_adjust() below).
+//
+// What this property publishes are therefore heights to draw, not numbers to
+// compute with. The whole file extraction (mediaxx) is the other half of this:
+// it keeps the measured levels, because the chorus analysis, the export and
+// everything else that works on values need them to mean something. The two
+// do not have to give the same numbers for the same audio, and they are not
+// supposed to: only the frequency axis is shared (see AUDIO_FFT_BAND_EDGES
+// below).
 //
 // Each frame is transformed on its own: the newest window of samples that
 // still fits into one frame (a power of two, 4096 samples at 44.1 kHz, which
@@ -991,18 +998,18 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // Samples are collected from the audio frames that go to the audio output,
 // before the audio output applies its gain (see ao_post_process_data(), which
 // runs when the output takes a frame out of its queue), and that is also why
-// this works for every source, not only local files (the batch extraction
-// needs the file). Because that point runs ahead of the sound, the window is
-// taken around the position that is played now: the audio the output has
-// queued but not played yet is left out (see ao_get_delay(), the same delay
-// playing_audio_pts() uses). Without that, the spectrum would lead the sound
-// by the queued amount, about 0.4 seconds with the null output. The tables and
-// buffers are built once per size and rate, so publishing a frame does not
-// allocate memory or call trigonometric functions in a loop. The levels
-// therefore describe the audio and not the volume: the volume, volume-gain and
-// mute settings all change the sound after this point, so a muted player still
-// shows the running spectrum, like the batch extraction of a file does (it
-// does not know the volume either).
+// this works for every source, not only local files (the whole file
+// extraction needs the file). Because that point runs ahead of the sound,
+// the window is taken around the position that is played now: the audio the
+// output has queued but not played yet is left out (see ao_get_delay(), the
+// same delay playing_audio_pts() uses). Without that, the spectrum would
+// lead the sound by the queued amount, about 0.4 seconds with the null
+// output. The tables and buffers are built once per size and rate, so
+// publishing a frame does not allocate memory or call trigonometric
+// functions in a loop. The levels therefore describe the audio and not the
+// volume: the volume, volume-gain and mute settings all change the sound
+// after this point, so a muted player still shows the running spectrum, like
+// the whole file extraction does (it does not know the volume either).
 // ---------------------------------------------------------------------------
 
 // The published bands, as their edges in Hz: band i covers
@@ -1021,10 +1028,13 @@ void clear_audio_output_buffers(struct MPContext *mpctx) {
 // 42 percent cover 5 .. 20 kHz.
 //
 // Keep this table and the one in mediaxx
-// (src/lib/analyse/audio_visualization.h) identical: the batch extraction and
-// this property have to agree. The batch extraction publishes plain levels,
-// this property publishes what the picture draws (see
-// audio_fft_display_adjust() below).
+// (src/lib/analyse/audio_visualization.h) identical: both describe the same
+// frequency axis, so the whole file extraction and this property can be
+// compared band by band (the app draws the extracted data on the same bands
+// as the fallback picture). The values on that axis differ on purpose: this
+// property publishes the heights the picture draws (see
+// audio_fft_display_adjust() below), mediaxx publishes the measured levels
+// for the analysis.
 static const int AUDIO_FFT_BAND_EDGES[] = {
     0,     30,    60,    90,    120,   150,   180,   210,   240,   270,   300,
     330,   360,   390,   420,   450,   480,   510,   540,   570,   600,   630,
@@ -1306,16 +1316,26 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
 // fills a third of the height, and a dense part of a song (drums, vocals and
 // instruments at the same time: every band carries energy, neighbouring bands
 // differ by 30 .. 40 dB) is a wall that never reaches the floor. Neither looks
-// like "several waves at different heights".
+// like "several waves at different heights". This adjustment is what makes
+// the published bytes usable for drawing, and it is deliberately not applied
+// to the data of the whole file extraction: those stay measurements.
 //
-// A frame is therefore put on its own scale: the loudest band of that frame is
-// drawn at AUDIO_FFT_DISPLAY_TOP, a band AUDIO_FFT_DISPLAY_WINDOW_DB below it
-// is drawn at zero, and everything in between keeps its relative height. The
-// order of the bands does not change, only how much of the drawing height is
-// used. Measured on a real song this grows the differences between
-// neighbouring bands by about 45 percent and the frame to frame movement by
-// about 60 percent, and it flattens the difference between passages, which is
-// what fills the picture while the music plays.
+// A frame is therefore put on its own scale: a band
+// AUDIO_FFT_DISPLAY_WINDOW_DB below the loudest band of that frame is drawn
+// at zero, the loudest band reaches the top of the frame, and everything in
+// between keeps its relative height. The order of the bands does not change,
+// only how much of the drawing height is used. Measured on a real song this
+// grows the differences between neighbouring bands by about 45 percent and the
+// frame to frame movement by about 60 percent.
+//
+// How high the frame reaches follows the level of the frame: the loudest band
+// of the frame is drawn at AUDIO_FFT_DISPLAY_TOP times the share that the
+// level of that band has on the -80 .. 0 dB scale (a frame whose loudest band
+// is at -20 dB is at 0.75 of the full scale, so its tallest band is drawn at
+// three quarters of the height). A frame at full scale still reaches
+// AUDIO_FFT_DISPLAY_TOP, a quiet passage stays low. Without that, the
+// loudest band of every frame was drawn at the top, so a passage that is 30 dB
+// below the rest of the song looked exactly as loud as the loud parts.
 //
 // The bands of one frame still sit close together after that (most of them
 // land between 20 and 60 percent of the height, because only the loudest band
@@ -1336,11 +1356,13 @@ static inline uint8_t audio_fft_band_to_byte(struct MPContext *mpctx, double f0,
 // AUDIO_FFT_DISPLAY_GAMMA is applied last (a gamma curve on the height), which
 // lifts the middle of the range a little and keeps the very quiet frames low.
 //
-// The app and the plugins draw these bytes as they come; keep these constants
-// in step with AudioWaveBaseConfig_c in the app (defDisplayWindowDb /
-// defDisplayTopLevel / defDisplayGateLow / defDisplayGateHigh /
-// defDisplayContrast / defDisplayGamma, used when a frame comes from the batch
-// extraction instead of from this property).
+// The app and the plugins draw these bytes as they come: they are heights for
+// the picture, and the app does not touch them again. The frames of the whole
+// file extraction (mediaxx) are the other half: they stay plain levels, and
+// the app has its own adjustment for them (AudioWaveBaseConfig_c in the app),
+// used when it draws that data. The two adjustments are independent: this one
+// shapes what the kernel publishes for the picture, the other one shapes what
+// the app draws from the measured data.
 #define AUDIO_FFT_DISPLAY_WINDOW_DB 50.0
 #define AUDIO_FFT_DISPLAY_TOP 230.0
 #define AUDIO_FFT_DISPLAY_GATE_LOW 64.0
@@ -1357,6 +1379,13 @@ static void audio_fft_display_adjust(uint8_t *bytes, int count) {
     if (bytes[i] > peak)
       peak = bytes[i];
   }
+
+  // How high this frame may be drawn: the level of its loudest band decides
+  // it. The level of a band is on the -80 .. 0 dB scale (0 .. 255), so the
+  // loudest band says how loud the frame is (a band at -20 dB is at 0.75 of
+  // the full scale). The picture uses that share of the height, so a quiet
+  // passage stays low instead of being stretched to the top of the picture.
+  double loudness = (double)peak / 255.0;
 
   bool adjust = peak > (int)AUDIO_FFT_DISPLAY_GATE_LOW;
   double low = 0.0, span = 1.0, weight = 0.0;
@@ -1384,7 +1413,11 @@ static void audio_fft_display_adjust(uint8_t *bytes, int count) {
       double up = powf((float)place, (float)AUDIO_FFT_DISPLAY_CONTRAST);
       double down =
           powf((float)(1.0 - place), (float)AUDIO_FFT_DISPLAY_CONTRAST);
-      double scaled = up / (up + down) * AUDIO_FFT_DISPLAY_TOP;
+      // The shape of the frame (the differences between its bands) is scaled
+      // by the loudness of the frame: the loudest band of the frame lands at
+      // the height its own level asks for, the bands around it keep their
+      // relative height.
+      double scaled = up / (up + down) * AUDIO_FFT_DISPLAY_TOP * loudness;
       value += (scaled - value) * weight;
       if (value < 0.0)
         value = 0.0;

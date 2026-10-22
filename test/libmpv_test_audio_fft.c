@@ -28,6 +28,7 @@
 // change.
 static const char *tone_440_path = "audio_fft_tone_437.wav";
 static const char *tone_5000_path = "audio_fft_tone_5003.wav";
+static const char *tone_quiet_path = "audio_fft_tone_quiet.wav";
 static const double tone_440_hz = 437.0;
 static const double tone_5000_hz = 5003.0;
 static const char *noise_path = "audio_fft_noise.wav";
@@ -208,13 +209,15 @@ static void write_sample(FILE *f, double value) {
     fail("cannot write the sample file\n");
 }
 
-static void write_tone_wav(const char *path, double freq, double seconds) {
+static void write_tone_wav(const char *path, double freq, double seconds,
+                             double amplitude) {
   int samples = (int)(44100 * seconds);
   FILE *f = open_wav(path, samples);
   for (int i = 0; i < samples; i++)
-    write_sample(f, 0.5 * sin(2.0 * M_PI * freq * i / 44100.0));
+    write_sample(f, amplitude * sin(2.0 * M_PI * freq * i / 44100.0));
   fclose(f);
-  printf("wrote tone file %s (%.0f Hz, %.1f s)\n", path, freq, seconds);
+  printf("wrote tone file %s (%.0f Hz, %.1f s, amplitude %.2f)\n", path, freq,
+         seconds, amplitude);
 }
 
 // Noise for the rate test: every frame of noise is different, so every
@@ -355,11 +358,12 @@ static void run_spectrum(const char *path, int bin_count, int high_from,
 // covered 2.5 kHz) folded back into the low bands.
 //
 // The bands are read after the display adjustment (see
-// audio_fft_display_adjust()), which keeps the order of the bands and turns
-// the loudest band of a frame into a value near the top; a range far below the
-// loudest band stays at zero, so "no content in this range" is still visible.
-// The contrast step in between moves the bands away from the middle of the
-// height and leaves both ends in place, so it keeps those two properties.
+// audio_fft_display_adjust()), which keeps the order of the bands and draws
+// the loudest band of a frame near the top of that frame; a range far below
+// the loudest band stays at zero, so "no content in this range" is still
+// visible. The contrast step in between moves the bands away from the middle
+// of the height and leaves both ends in place, so it keeps those two
+// properties.
 static void test_audio_fft_spectrum(void) {
   const int bin_count = 256;
   const uint8_t floor_value = 8;
@@ -402,11 +406,10 @@ static void test_audio_fft_spectrum(void) {
 
 // The picture describes the audio, not the volume. The samples are collected
 // before the audio output applies its gain (volume, volume-gain, mute), and
-// the frame is put on its own scale afterwards, so a quiet or muted player
-// keeps showing the running spectrum and the published bytes stay the same as
-// at full volume. Muting is the part that catches a capture point which moved
-// behind the gain: the samples would drop to zero and the frame would be
-// empty.
+// the frame is shaped afterwards, so a quiet or muted player keeps showing the
+// running spectrum and the published bytes stay the same as at full volume.
+// Muting is the part that catches a capture point which moved behind the
+// gain: the samples would drop to zero and the frame would be empty.
 static void test_audio_fft_volume(void) {
   const int bin_count = 256;
   struct spectrum_result full, quiet, muted;
@@ -436,6 +439,34 @@ static void test_audio_fft_volume(void) {
          muted.average_peak_value, full.average_peak_value);
 
   printf("audio-fft volume test passed!\n");
+}
+
+// The height of the published frame follows the level of the audio. Two
+// tones with the same frequency but different levels have to be published
+// with different heights: the quiet one must not be drawn as high as the loud
+// one, or a quiet passage of a song looks as loud as its loud parts.
+static void test_audio_fft_level(void) {
+  const int bin_count = 256;
+  struct spectrum_result loud, quiet;
+
+  run_spectrum(tone_440_path, bin_count, 0, 0, &loud);
+  run_spectrum(tone_quiet_path, bin_count, 0, 0, &quiet);
+
+  printf("audio-fft level: peak value %d for the loud tone, %d for the quiet "
+         "one\n",
+         loud.average_peak_value, quiet.average_peak_value);
+  if (quiet.average_peak_value >= loud.average_peak_value)
+    fail("audio-fft: the quiet tone is drawn as high as the loud one (%d vs "
+         "%d)\n",
+         quiet.average_peak_value, loud.average_peak_value);
+  if (quiet.average_peak_value * 4 > loud.average_peak_value * 3)
+    fail("audio-fft: the quiet tone is drawn too high (%d vs %d)\n",
+         quiet.average_peak_value, loud.average_peak_value);
+  if (quiet.average_peak_value < 20)
+    fail("audio-fft: the quiet tone is not published at all (%d)\n",
+         quiet.average_peak_value);
+
+  printf("audio-fft level test passed!\n");
 }
 
 static void test_audio_fft_no_observers(void) {
@@ -591,8 +622,9 @@ int main(void) {
 
   initialize();
 
-  write_tone_wav(tone_440_path, tone_440_hz, 3.0);
-  write_tone_wav(tone_5000_path, tone_5000_hz, 3.0);
+  write_tone_wav(tone_440_path, tone_440_hz, 3.0, 0.5);
+  write_tone_wav(tone_5000_path, tone_5000_hz, 3.0, 0.5);
+  write_tone_wav(tone_quiet_path, tone_440_hz, 3.0, 0.02);
   write_noise_wav(noise_path, 3.0);
   write_mark_wav(mark_path, 3.0, 1.0);
 
@@ -609,6 +641,9 @@ int main(void) {
 
   printf(fmt, "test_audio_fft_volume");
   test_audio_fft_volume();
+
+  printf(fmt, "test_audio_fft_level");
+  test_audio_fft_level();
 
   printf(fmt, "test_audio_fft_no_observers");
   test_audio_fft_no_observers();
