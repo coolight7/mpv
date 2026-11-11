@@ -53,10 +53,10 @@
 
 static void print_version(struct mp_log *log) { mp_print_version(log, true); }
 
-extern const struct m_sub_options tv_params_conf;
 extern const struct m_sub_options stream_bluray_conf;
 extern const struct m_sub_options stream_cdda_conf;
 extern const struct m_sub_options stream_dvb_conf;
+extern const struct m_sub_options mp_network_conf;
 extern const struct m_sub_options stream_lavf_conf;
 extern const struct m_sub_options sws_conf;
 extern const struct m_sub_options zimg_conf;
@@ -66,6 +66,9 @@ extern const struct m_sub_options demux_rawvideo_conf;
 extern const struct m_sub_options demux_playlist_conf;
 extern const struct m_sub_options demux_lavf_conf;
 extern const struct m_sub_options demux_mkv_conf;
+#if HAVE_SUBRANDR
+extern const struct m_sub_options demux_sbr_conf;
+#endif
 extern const struct m_sub_options vd_lavc_conf;
 extern const struct m_sub_options ad_lavc_conf;
 extern const struct m_sub_options hwdec_conf;
@@ -86,7 +89,9 @@ extern const struct m_obj_list vo_obj_list;
 extern const struct m_sub_options ao_conf;
 
 extern const struct m_sub_options dvd_conf;
+extern const struct m_sub_options dvda_conf;
 extern const struct m_sub_options clipboard_conf;
+extern const struct m_sub_options curl_conf;
 
 extern const struct m_sub_options opengl_conf;
 extern const struct m_sub_options vulkan_conf;
@@ -217,6 +222,7 @@ static const m_option_t mp_vo_opt_list[] = {
     {"wayland-edge-pixels-touch", OPT_INT(wl_edge_pixels_touch),
      M_RANGE(0, INT_MAX)},
     {"wayland-present", OPT_BOOL(wl_present)},
+    {"wayland-session", OPT_STRING(wayland_session)},
 #endif
 #if HAVE_WIN32_DESKTOP
 // For old MinGW-w64 compatibility
@@ -316,7 +322,6 @@ const struct m_sub_options mp_subtitle_sub_opts = {
             {"sub-gauss", OPT_FLOAT(sub_gauss), M_RANGE(0.0, 3.0)},
             {"sub-gray", OPT_BOOL(sub_gray)},
             {"sub-ass", OPT_BOOL(ass_enabled), .flags = UPDATE_SUB_HARD},
-            {"sub-scale", OPT_FLOAT(sub_scale), M_RANGE(0, 100)},
             {"sub-scale-signs", OPT_BOOL(sub_scale_signs)},
             {"sub-line-spacing", OPT_FLOAT(sub_line_spacing),
              M_RANGE(-1000, 1000)},
@@ -377,7 +382,6 @@ const struct m_sub_options mp_subtitle_sub_opts = {
             .sub_scale_with_window = true,
             .ass_prune_delay = -1.0,
             .teletext_page = 0,
-            .sub_scale = 1,
             .ass_vsfilter_color_compat = 1,
             .ass_use_video_data = 2,
             .ass_video_aspect = 0,
@@ -393,10 +397,12 @@ const struct m_sub_options mp_subtitle_sub_opts = {
 const struct m_sub_options mp_subtitle_shared_sub_opts = {
     .opts =
         (const struct m_option[]){
-            {"sub-delay", OPT_FLOAT(sub_delay[0])},
-            {"secondary-sub-delay", OPT_FLOAT(sub_delay[1])},
+            {"sub-delay", OPT_DOUBLE(sub_delay[0])},
+            {"secondary-sub-delay", OPT_DOUBLE(sub_delay[1])},
             {"sub-pos", OPT_FLOAT(sub_pos[0]), M_RANGE(0.0, 150.0)},
             {"secondary-sub-pos", OPT_FLOAT(sub_pos[1]), M_RANGE(0.0, 150.0)},
+            {"sub-scale", OPT_FLOAT(sub_scale[0]), M_RANGE(0, 100)},
+            {"secondary-sub-scale", OPT_FLOAT(sub_scale[1]), M_RANGE(0, 100)},
             {"sub-visibility", OPT_BOOL(sub_visibility[0])},
             {"secondary-sub-visibility", OPT_BOOL(sub_visibility[1])},
             {"sub-ass-override",
@@ -420,6 +426,8 @@ const struct m_sub_options mp_subtitle_shared_sub_opts = {
             .sub_visibility[0] = true,
             .sub_visibility[1] = true,
             .sub_pos[0] = 100,
+            .sub_scale[0] = 1,
+            .sub_scale[1] = 1,
             .ass_style_override[0] = ASS_STYLE_OVERRIDE_SCALE,
             .ass_style_override[1] = ASS_STYLE_OVERRIDE_STRIP,
         },
@@ -532,7 +540,7 @@ static const m_option_t mp_opts[] = {
      OPT_CHOICE(operation_mode, {"cplayer", 0}, {"pseudo-gui", 1}),
      .flags = M_OPT_PRE_PARSE | M_OPT_NOPROP},
 
-    {"shuffle", OPT_BOOL(shuffle)},
+    {"shuffle", OPT_BOOL(shuffle), .flags = M_OPT_PRE_PARSE},
 
     // ------------------------- common options --------------------
     {"quiet", OPT_BOOL(quiet)},
@@ -605,7 +613,13 @@ static const m_option_t mp_opts[] = {
 #if HAVE_DVDNAV
     {"dvd", OPT_SUBSTRUCT(dvd_opts, dvd_conf)},
 #endif
+#if HAVE_DVDA
+    {"dvda", OPT_SUBSTRUCT(dvda_opts, dvda_conf)},
+#endif
     {"edition", OPT_CHOICE(edition_id, {"auto", -1}), M_RANGE(0, 8190)},
+    {"flatten-editions", OPT_BOOL(flatten_editions)},
+    {"disc-menu", OPT_BOOL(disc_menu)},
+    {"show-dependent-tracks", OPT_BOOL(show_dependent_tracks)},
 #if HAVE_LIBBLURAY
     {"bluray", OPT_SUBSTRUCT(stream_bluray_opts, stream_bluray_conf)},
 #endif /* HAVE_LIBBLURAY */
@@ -630,6 +644,8 @@ static const m_option_t mp_opts[] = {
 
     {"playlist-start", OPT_CHOICE(playlist_pos, {"auto", -1}, {"no", -1}),
      M_RANGE(0, INT_MAX)},
+    {"playlist-inherit-options", OPT_CHOICE(playlist_inherit_options, {"no", 0},
+                                            {"yes", 1}, {"current", 2})},
 
     {"pause", OPT_BOOL(pause)},
     {"keep-open", OPT_CHOICE(keep_open, {"no", 0}, {"yes", 1}, {"always", 2})},
@@ -689,6 +705,7 @@ static const m_option_t mp_opts[] = {
 #if HAVE_DVBIN
     {"dvbin", OPT_SUBSTRUCT(stream_dvb_opts, stream_dvb_conf)},
 #endif
+    {"", OPT_SUBSTRUCT(network_opts, mp_network_conf)},
     {"", OPT_SUBSTRUCT(stream_lavf_opts, stream_lavf_conf)},
 
     // ------------------------- a-v sync options --------------------
@@ -711,7 +728,7 @@ static const m_option_t mp_opts[] = {
     {"audio-fft-size", OPT_INT(audio_fft_size), M_RANGE(1, 256)},
 
     // set a-v distance
-    {"audio-delay", OPT_FLOAT(audio_delay)},
+    {"audio-delay", OPT_DOUBLE(audio_delay)},
 
     // ------------------------- codec/vfilter options --------------------
 
@@ -731,6 +748,9 @@ static const m_option_t mp_opts[] = {
     {"demuxer-rawvideo", OPT_SUBSTRUCT(demux_rawvideo, demux_rawvideo_conf)},
     {"", OPT_SUBSTRUCT(demux_playlist, demux_playlist_conf)},
     {"demuxer-mkv", OPT_SUBSTRUCT(demux_mkv, demux_mkv_conf)},
+#if HAVE_SUBRANDR
+    {"demuxer-sbr", OPT_SUBSTRUCT(demux_sbr, demux_sbr_conf)},
+#endif
 
     // ------------------------- subtitles options --------------------
 
@@ -750,7 +770,7 @@ static const m_option_t mp_opts[] = {
 
     {"sub-auto",
      OPT_CHOICE(sub_auto, {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
-    {"sub-auto-exts", OPT_STRINGLIST(sub_auto_exts), .flags = UPDATE_SUB_EXTS},
+    {"sub-auto-exts", OPT_STRINGLIST(sub_auto_exts)},
     {"audio-file-auto", OPT_CHOICE(audiofile_auto, {"no", -1}, {"exact", 0},
                                    {"fuzzy", 1}, {"all", 2})},
     {"audio-exts", OPT_STRINGLIST(audio_exts)},
@@ -908,8 +928,10 @@ static const m_option_t mp_opts[] = {
 #endif
     {"input-terminal", OPT_BOOL(consolecontrols), .flags = UPDATE_TERM},
 
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     {"input-ipc-server", OPT_STRING(ipc_path), .flags = M_OPT_FILE},
     {"input-ipc-client", OPT_STRING(ipc_client)},
+#endif
 
     {"screenshot", OPT_SUBSTRUCT(screenshot_image_opts, screenshot_conf)},
     {"screenshot-template", OPT_STRING(screenshot_template)},
@@ -920,8 +942,13 @@ static const m_option_t mp_opts[] = {
     {"", OPT_SUBSTRUCT(resample_opts, resample_conf)},
 
     {"", OPT_SUBSTRUCT(input_opts, input_config)},
+    {"input-builtin-drag-and-drop", OPT_BOOL(builtin_dnd)},
 
     {"clipboard", OPT_SUBSTRUCT(clipboard_opts, clipboard_conf)},
+
+#if HAVE_LIBCURL
+    {"curl", OPT_SUBSTRUCT(curl_opts, curl_conf)},
+#endif
 
     {"", OPT_SUBSTRUCT(vo, vo_sub_opts)},
     {"", OPT_SUBSTRUCT(demux_opts, demux_conf)},
@@ -1082,22 +1109,26 @@ static const struct MPOpts mp_default_opts = {
     .screenshot_template = "mpv-shot%n",
     .play_dir = 1,
     .media_controls = true,
+    .builtin_dnd = true,
     .video_exts =
         (char *[]){"3g2", "3gp",  "avi", "flv",  "ivf",  "m2ts", "m4v",
                    "mj2", "mkv",  "mov", "mp4",  "mpeg", "mpg",  "mxf",
                    "ogv", "rmvb", "ts",  "webm", "wmv",  "y4m",  NULL},
-    .audio_exts = (char *[]){"aac",  "ac3", "aiff", "ape", "au",  "dts", "eac3",
-                             "flac", "m4a", "mka",  "mp3", "oga", "ogg", "ogm",
-                             "opus", "thd", "wav",  "wma", "wv",  NULL},
+    .audio_exts = (char *[]){"aac", "ac3",  "aiff", "ape", "au",  "dff",  "dsf",
+                             "dts", "eac3", "flac", "m4a", "mka", "mp1",  "mp2",
+                             "mp3", "mpc",  "oga",  "ogg", "ogm", "opus", "tak",
+                             "thd", "tta",  "wav",  "wma", "wv",  NULL},
     .image_exts = (char *[]){"avif", "bmp", "gif", "heic", "heif", "j2k", "jp2",
                              "jpeg", "jpg", "jxl", "png", "qoi", "svg", "tga",
                              "tif", "tiff", "webp", NULL},
     .archive_exts = (char *[]){"zip", "rar", "7z", "cbz", "cbr", NULL},
-    .playlist_exts = (char *[]){"cue", "edl", "m3u", "m3u8", "pls", NULL},
+    .playlist_exts =
+        (char *[]){"cue", "edl", "m3u", "m3u8", "pls", "strm", NULL},
 
-    .sub_auto_exts = (char *[]){"ass", "idx", "lrc", "mks", "pgs", "rt", "sbv",
-                                "scc", "smi", "srt", "ssa", "sub", "sup", "utf",
-                                "utf-8", "utf8", "vtt", NULL},
+    .sub_auto_exts =
+        (char *[]){"ass", "idx",   "lrc",  "mks",  "pgs", "rt",  "sbv",
+                   "scc", "smi",   "srt",  "srv3", "ssa", "sub", "sup",
+                   "utf", "utf-8", "utf8", "vtt",  "ytt", NULL},
 
     // Stolen from: vlc/-/blob/master/modules/meta_engine/folder.c#L40
     // sorted by priority (descending)
@@ -1153,6 +1184,7 @@ static const struct MPOpts mp_default_opts = {
                                       "secondary-sid",
                                       "secondary-sub-delay",
                                       "secondary-sub-pos",
+                                      "secondary-sub-scale",
                                       "secondary-sub-ass-override",
                                       "secondary-sub-visibility",
                                       "ab-loop-a",

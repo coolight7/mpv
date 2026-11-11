@@ -196,8 +196,8 @@ static void byte_array_value_copy(union m_option_value *dst,
   const struct mpv_byte_array *s = (const struct mpv_byte_array *)src;
   struct mpv_byte_array copy = {
       .size = s->size,
-      .data = (s->data && s->size) ? talloc_memdup(NULL, s->data, s->size)
-                                   : NULL,
+      .data =
+          (s->data && s->size) ? talloc_memdup(NULL, s->data, s->size) : NULL,
   };
   byte_array_value_free(dst);
   *byte_array_value(dst) = copy;
@@ -288,8 +288,8 @@ bool mp_client_id_exists(struct MPContext *mpctx, int64_t id) {
   return r;
 }
 
-struct mpv_handle *mp_new_client(struct mp_client_api *clients,
-                                 const char *name) {
+static struct mpv_handle *new_client(struct mp_client_api *clients,
+                                     const char *name, bool weak) {
   mp_mutex_lock(&clients->lock);
 
   char nname[MAX_CLIENT_NAME];
@@ -325,6 +325,7 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients,
       .event_mask =
           (1ULL << INTERNAL_EVENT_BASE) - 1, // exclude internal events
       .wakeup_pipe = {-1, -1},
+      .is_weak = weak,
   };
   mp_mutex_init(&client->lock);
   mp_mutex_init(&client->wakeup_lock);
@@ -345,10 +346,14 @@ struct mpv_handle *mp_new_client(struct mp_client_api *clients,
   return client;
 }
 
-void mp_client_set_weak(struct mpv_handle *ctx) {
-  mp_mutex_lock(&ctx->lock);
-  ctx->is_weak = true;
-  mp_mutex_unlock(&ctx->lock);
+struct mpv_handle *mp_new_client(struct mp_client_api *clients,
+                                 const char *name) {
+  return new_client(clients, name, false);
+}
+
+struct mpv_handle *mp_new_weak_client(struct mp_client_api *clients,
+                                      const char *name) {
+  return new_client(clients, name, true);
 }
 
 const char *mpv_client_name(mpv_handle *ctx) { return ctx->name; }
@@ -609,14 +614,14 @@ static MP_THREAD_VOID core_thread(void *p) {
   MP_THREAD_RETURN();
 }
 
-mpv_handle *mpv_create(void) {
+static mpv_handle *create_core(bool weak) {
   struct MPContext *mpctx = mp_create();
   if (!mpctx)
     return NULL;
 
   m_config_set_profile(mpctx->mconfig, "libmpv", 0);
 
-  mpv_handle *ctx = mp_new_client(mpctx->clients, "main");
+  mpv_handle *ctx = new_client(mpctx->clients, "main", weak);
   if (!ctx) {
     mp_destroy(mpctx);
     return NULL;
@@ -632,20 +637,23 @@ mpv_handle *mpv_create(void) {
   return ctx;
 }
 
-mpv_handle *mpv_create_client(mpv_handle *ctx, const char *name) {
+mpv_handle *mpv_create(void) { return create_core(false); }
+
+static mpv_handle *create_client(mpv_handle *ctx, const char *name, bool weak) {
   if (!ctx)
-    return mpv_create();
-  mpv_handle *new = mp_new_client(ctx->mpctx->clients, name);
+    return create_core(weak);
+  mpv_handle *new = new_client(ctx->mpctx->clients, name, weak);
   if (new)
     mpv_wait_event(new, 0); // set fuzzy_initialized
   return new;
 }
 
+mpv_handle *mpv_create_client(mpv_handle *ctx, const char *name) {
+  return create_client(ctx, name, false);
+}
+
 mpv_handle *mpv_create_weak_client(mpv_handle *ctx, const char *name) {
-  mpv_handle *new = mpv_create_client(ctx, name);
-  if (new)
-    mp_client_set_weak(new);
-  return new;
+  return create_client(ctx, name, true);
 }
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
@@ -809,10 +817,12 @@ int mp_client_send_event(struct MPContext *mpctx, const char *client_name,
     r = send_event(ctx, &event_data, false);
   } else {
     r = -1;
-    talloc_free(data);
   }
 
   mp_mutex_unlock(&clients->lock);
+
+  if (r < 0)
+    talloc_free(data);
 
   return r;
 }
