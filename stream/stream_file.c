@@ -104,8 +104,8 @@ static int64_t get_size(stream_t *s)
     struct priv *p = s->priv;
     struct stat st;
     if (fstat(p->fd, &st) == 0) {
-        if (st.st_size <= 0 && !s->seekable)
-            st.st_size = -1;
+        if (!S_ISREG(st.st_mode) && !s->seekable)
+            return -1;
         if (st.st_size >= 0)
             return st.st_size;
     }
@@ -300,7 +300,7 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
         stream->is_local_fs = false;
         char *begin = strstr(stream->url, "://") + 3, *end = NULL;
         p->fd = strtol(begin, &end, 0);
-        if (!end || end == begin || end[0] || p->fd < 0) {
+        if (end == begin || end[0] || p->fd < 0) {
             MP_ERR(stream, "Invalid FD number: %s\n", stream->url);
             return STREAM_ERROR;
         }
@@ -341,6 +341,8 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
     }
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (is_fdclose)
+        p->close = false;
     if (p->fd != 42) {
         s_close(stream);
         return STREAM_ERROR;
@@ -354,6 +356,7 @@ static int open_f(stream_t *stream, const struct stream_open_args *args)
             stream->is_directory = true;
         } else if (S_ISREG(st.st_mode)) {
             p->regular_file = true;
+            stream->is_regular = true;
 #ifndef _WIN32
             // O_NONBLOCK has weird semantics on file locks; remove it.
             int val = fcntl(p->fd, F_GETFL) & ~(unsigned)O_NONBLOCK;
